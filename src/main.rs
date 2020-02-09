@@ -20,6 +20,12 @@ struct Options {
     search_string: String,
     #[structopt(short = "i", long = "ignore-case", help = "Ignore case")]
     ignore_case: bool,
+    #[structopt(
+        short = "f",
+        long = "fuzzy",
+        help = "Apply fuzzy matching (instead of absolute)"
+    )]
+    fuzzy: bool,
     #[structopt(help = "Directory to sweep through", parse(from_os_str))]
     dir: PathBuf,
 }
@@ -97,6 +103,15 @@ impl Matcher for SubstringMatcher {
         s.contains(&self.0)
     }
 }
+struct FuzzyMatcher(String);
+impl Matcher for FuzzyMatcher {
+    fn new(pattern: String) -> Self {
+        FuzzyMatcher(pattern)
+    }
+    fn matches(&self, s: &str) -> bool {
+        fuzzy_matcher::skim::fuzzy_match(s, &self.0).is_some()
+    }
+}
 
 fn run(dir: PathBuf, matcher: impl Matcher) {
     let mut addrs = HashMap::new();
@@ -146,12 +161,24 @@ fn run(dir: PathBuf, matcher: impl Matcher) {
 fn main() {
     let options = Options::from_args();
 
-    if options.ignore_case {
-        run(
-            options.dir,
-            CaseInsensitiveMatcher::<SubstringMatcher>::new(options.search_string),
-        )
+    // Somewhat ugly, but what we need for compile time dispatch
+    if options.fuzzy {
+        if options.ignore_case {
+            run(
+                options.dir,
+                CaseInsensitiveMatcher::<FuzzyMatcher>::new(options.search_string),
+            )
+        } else {
+            run(options.dir, FuzzyMatcher::new(options.search_string))
+        }
     } else {
-        run(options.dir, SubstringMatcher::new(options.search_string))
+        if options.ignore_case {
+            run(
+                options.dir,
+                CaseInsensitiveMatcher::<SubstringMatcher>::new(options.search_string),
+            )
+        } else {
+            run(options.dir, SubstringMatcher::new(options.search_string))
+        }
     }
 }
