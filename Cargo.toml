@@ -1,0 +1,15 @@
+[package]
+name = "mail-sweep"
+version = "0.1.0"
+authors = ["ftilde <ftilde@protonmail.com>"]
+edition = "2018"
+
+[profile.release]
+debug = true #for profiling
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+mailparse = "0.10"
+walkdir = "2.3"
+structopt = "0.3"
