@@ -18,6 +18,8 @@ struct Options {
         default_value = ""
     )]
     search_string: String,
+    #[structopt(short = "i", long = "ignore-case", help = "Ignore case")]
+    ignore_case: bool,
     #[structopt(help = "Directory to sweep through", parse(from_os_str))]
     dir: PathBuf,
 }
@@ -31,7 +33,7 @@ struct AddrData {
 fn process(
     addrs: &mut HashMap<String, AddrData>,
     p: &Path,
-    search_string: &str,
+    matcher: &impl Matcher,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let file = std::fs::File::open(p)?;
     let reader = BufReader::new(file);
@@ -47,11 +49,11 @@ fn process(
                     MailAddr::Single(a) => a,
                     MailAddr::Group(_) => return Ok(()),
                 };
-                if addr.addr.contains(search_string)
+                if matcher.matches(&addr.addr)
                     || addr
                         .display_name
                         .as_ref()
-                        .map(|n| n.contains(search_string))
+                        .map(|n| matcher.matches(n))
                         .unwrap_or(false)
                 {
                     let data = addrs
@@ -59,7 +61,7 @@ fn process(
                         .or_insert(AddrData::default());
                     data.occurences += 1;
                     if let Some(name) = &addr.display_name {
-                        if name.contains(search_string) {
+                        if matcher.matches(name) {
                             *data.name_variants.entry(name.to_owned()).or_insert(0) += 1;
                         }
                     }
@@ -71,12 +73,35 @@ fn process(
     Ok(())
 }
 
-fn main() {
-    let options = Options::from_args();
+trait Matcher {
+    fn new(pattern: String) -> Self;
+    fn matches(&self, s: &str) -> bool;
+}
 
+struct CaseInsensitiveMatcher<M>(M);
+impl<M: Matcher> Matcher for CaseInsensitiveMatcher<M> {
+    fn new(pattern: String) -> Self {
+        CaseInsensitiveMatcher(M::new(pattern.to_lowercase()))
+    }
+    fn matches(&self, s: &str) -> bool {
+        self.0.matches(&s.to_lowercase())
+    }
+}
+
+struct SubstringMatcher(String);
+impl Matcher for SubstringMatcher {
+    fn new(pattern: String) -> Self {
+        SubstringMatcher(pattern)
+    }
+    fn matches(&self, s: &str) -> bool {
+        s.contains(&self.0)
+    }
+}
+
+fn run(dir: PathBuf, matcher: impl Matcher) {
     let mut addrs = HashMap::new();
 
-    for entry in WalkDir::new(options.dir) {
+    for entry in WalkDir::new(dir) {
         let entry = match entry {
             Ok(entry) => entry,
             Err(e) => {
@@ -89,7 +114,7 @@ fn main() {
             continue;
         }
 
-        match process(&mut addrs, entry.path(), &options.search_string) {
+        match process(&mut addrs, entry.path(), &matcher) {
             Ok(_) => {}
             Err(_e) => {
                 //eprintln!("Process error: {}", e);
@@ -115,5 +140,18 @@ fn main() {
             .unwrap_or("");
 
         let _ = writeln!(stdout, "{}\t{}", addr, name_variant);
+    }
+}
+
+fn main() {
+    let options = Options::from_args();
+
+    if options.ignore_case {
+        run(
+            options.dir,
+            CaseInsensitiveMatcher::<SubstringMatcher>::new(options.search_string),
+        )
+    } else {
+        run(options.dir, SubstringMatcher::new(options.search_string))
     }
 }
