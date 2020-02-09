@@ -1,6 +1,8 @@
-use mailparse::{addrparse, parse_mail, MailAddr};
+use bstr::io::BufReadExt;
+use mailparse::{addrparse, parse_header, MailAddr};
 use std::collections::HashMap;
-use std::io::Read;
+use std::io::BufReader;
+use std::io::Write;
 use std::path::Path;
 use std::path::PathBuf;
 use structopt::StructOpt;
@@ -20,29 +22,50 @@ struct Options {
     dir: PathBuf,
 }
 
+#[derive(Default)]
+struct AddrData {
+    name_variants: HashMap<String, u64>,
+    occurences: u64,
+}
+
 fn process(
-    addrs: &mut HashMap<String, u64>,
+    addrs: &mut HashMap<String, AddrData>,
     p: &Path,
     search_string: &str,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let mut file = std::fs::File::open(p)?;
-    let mut buf = Vec::new();
-    file.read_to_end(&mut buf)?;
-    let mail = parse_mail(&buf)?;
+    let file = std::fs::File::open(p)?;
+    let reader = BufReader::new(file);
 
-    for header in mail.headers {
-        let key = header.get_key()?;
-        if key == "To" || key == "From" || key == "CC" || key == "BCC" {
-            let value = header.get_value()?;
-            for addr in &*addrparse(&value)? {
+    for line in reader.byte_lines() {
+        let line = line?;
+        if line.len() > 6 && &line[0..6] == b"From: " {
+            //TODO CC etc.
+
+            let header = parse_header(&line)?;
+            for addr in &*addrparse(&header.0.get_value()?)? {
                 let addr = match addr {
                     MailAddr::Single(a) => a,
                     MailAddr::Group(_) => return Ok(()),
                 };
-                if addr.addr.contains(search_string) {
-                    *addrs.entry(addr.addr.to_owned()).or_insert(0) += 1;
+                if addr.addr.contains(search_string)
+                    || addr
+                        .display_name
+                        .as_ref()
+                        .map(|n| n.contains(search_string))
+                        .unwrap_or(false)
+                {
+                    let data = addrs
+                        .entry(addr.addr.to_owned())
+                        .or_insert(AddrData::default());
+                    data.occurences += 1;
+                    if let Some(name) = &addr.display_name {
+                        if name.contains(search_string) {
+                            *data.name_variants.entry(name.to_owned()).or_insert(0) += 1;
+                        }
+                    }
                 }
             }
+            return Ok(());
         }
     }
     Ok(())
@@ -68,16 +91,29 @@ fn main() {
 
         match process(&mut addrs, entry.path(), &options.search_string) {
             Ok(_) => {}
-            Err(e) => {
-                eprintln!("Process error: {}", e);
+            Err(_e) => {
+                //eprintln!("Process error: {}", e);
                 continue;
             }
         }
     }
 
     let mut addrs = addrs.into_iter().collect::<Vec<_>>();
-    addrs.sort_by_key(|(_, count)| *count);
-    for (addr, _) in addrs {
-        println!("{}", addr);
+    // Sort (reverse) so that high number of occurences are on top
+    addrs.sort_by_key(|(_, data)| u64::max_value() - data.occurences);
+
+    let stdout = std::io::stdout();
+    let mut stdout = stdout.lock();
+
+    let _ = writeln!(stdout, "");
+    for (addr, data) in addrs {
+        let name_variant = data
+            .name_variants
+            .iter()
+            .max_by_key(|(_, n)| *n)
+            .map(|(name, _)| name.as_str())
+            .unwrap_or("");
+
+        let _ = writeln!(stdout, "{}\t{}", addr, name_variant);
     }
 }

@@ -13,3 +13,4 @@ debug = true #for profiling
 mailparse = "0.10"
 walkdir = "2.3"
 structopt = "0.3"
+bstr = "0.2"
