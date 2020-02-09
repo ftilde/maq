@@ -46,9 +46,21 @@ fn process(
 
     for line in reader.byte_lines() {
         let line = line?;
-        if line.len() > 6 && &line[0..6] == b"From: " {
-            //TODO CC etc.
+        if line.is_empty() {
+            // End of header (i think?)
+            return Ok(());
+        }
+        /* TODO: use sub slice patterns when stable in 1.42
+        let is_addr_line = match line.as_slice() {
+            [b'F', b'r', b'o', b'm', b':', b' ', ..] => true,
+            _ => false,
+        };*/
+        let is_addr_line = line.len() > 6 && &line[0..6] == b"From: "
+            || line.len() > 4 && &line[0..4] == b"To: "
+            || line.len() > 4 && &line[0..4] == b"CC: "
+            || line.len() > 5 && &line[0..5] == b"BCC: ";
 
+        if is_addr_line {
             let header = parse_header(&line)?;
             for addr in &*addrparse(&header.0.get_value()?)? {
                 let addr = match addr {
@@ -73,7 +85,6 @@ fn process(
                     }
                 }
             }
-            return Ok(());
         }
     }
     Ok(())
