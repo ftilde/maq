@@ -1,13 +1,13 @@
 [package]
-name = "mail-sweep"
+name = "maq"
 version = "0.1.0"
 authors = ["ftilde <ftilde@protonmail.com>"]
 edition = "2018"
+description = "maildir-address-query: Collect and query mail addresses from maildirs"
+license = "MIT"
 
-[profile.release]
-debug = true #for profiling
-
-# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+#[profile.release]
+#debug = true #for profiling
 
 [dependencies]
 mailparse = "0.10"

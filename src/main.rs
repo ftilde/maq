@@ -1,10 +1,8 @@
 use bstr::io::BufReadExt;
 use mailparse::{addrparse, parse_header, MailAddr};
 use std::collections::HashMap;
-use std::io::BufReader;
-use std::io::Write;
-use std::path::Path;
-use std::path::PathBuf;
+use std::io::{BufReader, Write};
+use std::path::{Path, PathBuf};
 use structopt::StructOpt;
 use walkdir::WalkDir;
 
@@ -26,7 +24,7 @@ struct Options {
         help = "Apply fuzzy matching (instead of absolute)"
     )]
     fuzzy: bool,
-    #[structopt(help = "Directory to sweep through", parse(from_os_str))]
+    #[structopt(help = "base directory for recursive mail search", parse(from_os_str))]
     dir: PathBuf,
 }
 
@@ -47,7 +45,7 @@ fn process(
     for line in reader.byte_lines() {
         let line = line?;
         if line.is_empty() {
-            // End of header (i think?)
+            // Empty line: End of mail header
             return Ok(());
         }
         /* TODO: use sub slice patterns when stable in 1.42
@@ -172,7 +170,7 @@ fn run(dir: PathBuf, matcher: impl Matcher) {
 fn main() {
     let options = Options::from_args();
 
-    // Somewhat ugly, but what we need for compile time dispatch
+    // Somewhat ugly, but what we need for static dispatch
     if options.fuzzy {
         if options.ignore_case {
             run(
