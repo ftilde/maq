@@ -34,19 +34,22 @@ struct AddrData {
     occurences: u64,
 }
 
+fn to_io_err<I>(_: I) -> std::io::Error {
+    std::io::Error::from(std::io::ErrorKind::InvalidInput)
+}
+
 fn process(
     addrs: &mut HashMap<String, AddrData>,
     p: &Path,
     matcher: &impl Matcher,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let file = std::fs::File::open(p)?;
-    let reader = BufReader::new(file);
+    let reader = BufReader::with_capacity(4 * 1024, file);
 
-    for line in reader.byte_lines() {
-        let line = line?;
+    reader.for_byte_line(|line| {
         if line.is_empty() {
             // Empty line: End of mail header
-            return Ok(());
+            return Ok(false);
         }
         /* TODO: use sub slice patterns when stable in 1.42
         let is_addr_line = match line.as_slice() {
@@ -59,11 +62,11 @@ fn process(
             || line.len() > 5 && &line[0..5] == b"BCC: ";
 
         if is_addr_line {
-            let header = parse_header(&line)?;
-            for addr in &*addrparse(&header.0.get_value()?)? {
+            let header = parse_header(&line).map_err(to_io_err)?;
+            for addr in &*addrparse(&header.0.get_value().map_err(to_io_err)?).map_err(to_io_err)? {
                 let addr = match addr {
                     MailAddr::Single(a) => a,
-                    MailAddr::Group(_) => return Ok(()),
+                    MailAddr::Group(_) => return Ok(false),
                 };
                 if matcher.matches(&addr.addr)
                     || addr
@@ -84,7 +87,8 @@ fn process(
                 }
             }
         }
-    }
+        Ok(true)
+    })?;
     Ok(())
 }
 
