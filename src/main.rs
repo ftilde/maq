@@ -167,7 +167,7 @@ fn process_mails(
     }
 }
 
-fn process_results(receiver: Receiver<ProcessOutput>, matcher: impl Matcher) {
+fn process_results(receiver: Receiver<ProcessOutput>) {
     let mut addrs = HashMap::new();
     while let Ok(addr) = receiver.recv() {
         let data = addrs
@@ -175,9 +175,7 @@ fn process_results(receiver: Receiver<ProcessOutput>, matcher: impl Matcher) {
             .or_insert(AddrData::default());
         data.occurences += 1;
         if let Some(name) = &addr.display_name {
-            if matcher.matches(name) {
-                *data.name_variants.entry(name.to_owned()).or_insert(0) += 1;
-            }
+            *data.name_variants.entry(name.to_owned()).or_insert(0) += 1;
         }
     }
 
@@ -214,7 +212,7 @@ fn run(dir: PathBuf, matcher: impl Matcher) {
     }
 
     let result_thread = std::thread::spawn(|| {
-        process_results(addrinfo_receiver, matcher);
+        process_results(addrinfo_receiver);
     });
 
     std::mem::drop(path_receiver);
