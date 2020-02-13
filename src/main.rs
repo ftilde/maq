@@ -1,8 +1,9 @@
 use bstr::io::BufReadExt;
-use mailparse::{addrparse, parse_header, MailAddr};
+use crossbeam_channel::{bounded, Receiver, Sender};
+use mailparse::{addrparse, parse_header, MailAddr, SingleInfo};
 use std::collections::HashMap;
 use std::io::{BufReader, Write};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use structopt::StructOpt;
 use walkdir::WalkDir;
 
@@ -38,13 +39,81 @@ fn to_io_err<I>(_: I) -> std::io::Error {
     std::io::Error::from(std::io::ErrorKind::InvalidInput)
 }
 
-fn process(
-    addrs: &mut HashMap<String, AddrData>,
-    p: &Path,
+trait Matcher: Clone + Send + 'static {
+    fn new(pattern: String) -> Self;
+    fn matches(&self, s: &str) -> bool;
+}
+
+#[derive(Clone)]
+struct CaseInsensitiveMatcher<M>(M);
+impl<M: Matcher> Matcher for CaseInsensitiveMatcher<M> {
+    fn new(pattern: String) -> Self {
+        CaseInsensitiveMatcher(M::new(pattern.to_lowercase()))
+    }
+    fn matches(&self, s: &str) -> bool {
+        self.0.matches(&s.to_lowercase())
+    }
+}
+
+#[derive(Clone)]
+struct SubstringMatcher(String);
+impl Matcher for SubstringMatcher {
+    fn new(pattern: String) -> Self {
+        SubstringMatcher(pattern)
+    }
+    fn matches(&self, s: &str) -> bool {
+        s.contains(&self.0)
+    }
+}
+
+#[derive(Clone)]
+struct FuzzyMatcher(String);
+impl Matcher for FuzzyMatcher {
+    fn new(pattern: String) -> Self {
+        FuzzyMatcher(pattern)
+    }
+    fn matches(&self, s: &str) -> bool {
+        fuzzy_matcher::skim::fuzzy_match(s, &self.0).is_some()
+    }
+}
+
+fn find_mails(dir: PathBuf, sender: Sender<ProcessInput>) {
+    let batch_size = 64;
+    let mut batch = Vec::with_capacity(batch_size);
+    for entry in WalkDir::new(dir) {
+        let entry = match entry {
+            Ok(entry) => entry,
+            Err(e) => {
+                eprintln!("Dir error: {}", e);
+                continue;
+            }
+        };
+
+        if entry.file_type().is_dir() {
+            continue;
+        }
+
+        batch.push(entry.path().to_path_buf());
+        if batch.len() == batch_size {
+            sender.send(batch).expect("Receivers outlive sender");
+
+            batch = Vec::with_capacity(batch_size);
+        }
+    }
+    sender.send(batch).expect("Receivers outlive sender");
+}
+
+type ProcessInput = Vec<PathBuf>;
+type ProcessOutput = SingleInfo;
+
+fn process_mail(
+    p: PathBuf,
     matcher: &impl Matcher,
+    sender: &Sender<ProcessOutput>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let file = std::fs::File::open(p)?;
-    let reader = BufReader::with_capacity(4 * 1024, file);
+    let expected_header_size = 4 * 1024; // 4KB
+    let reader = BufReader::with_capacity(expected_header_size, file);
 
     reader.for_byte_line(|line| {
         if line.is_empty() {
@@ -75,15 +144,9 @@ fn process(
                         .map(|n| matcher.matches(n))
                         .unwrap_or(false)
                 {
-                    let data = addrs
-                        .entry(addr.addr.to_owned())
-                        .or_insert(AddrData::default());
-                    data.occurences += 1;
-                    if let Some(name) = &addr.display_name {
-                        if matcher.matches(name) {
-                            *data.name_variants.entry(name.to_owned()).or_insert(0) += 1;
-                        }
-                    }
+                    sender
+                        .send(addr.clone())
+                        .expect("Receiver outlives senders");
                 }
             }
         }
@@ -92,61 +155,28 @@ fn process(
     Ok(())
 }
 
-trait Matcher {
-    fn new(pattern: String) -> Self;
-    fn matches(&self, s: &str) -> bool;
-}
-
-struct CaseInsensitiveMatcher<M>(M);
-impl<M: Matcher> Matcher for CaseInsensitiveMatcher<M> {
-    fn new(pattern: String) -> Self {
-        CaseInsensitiveMatcher(M::new(pattern.to_lowercase()))
-    }
-    fn matches(&self, s: &str) -> bool {
-        self.0.matches(&s.to_lowercase())
-    }
-}
-
-struct SubstringMatcher(String);
-impl Matcher for SubstringMatcher {
-    fn new(pattern: String) -> Self {
-        SubstringMatcher(pattern)
-    }
-    fn matches(&self, s: &str) -> bool {
-        s.contains(&self.0)
-    }
-}
-struct FuzzyMatcher(String);
-impl Matcher for FuzzyMatcher {
-    fn new(pattern: String) -> Self {
-        FuzzyMatcher(pattern)
-    }
-    fn matches(&self, s: &str) -> bool {
-        fuzzy_matcher::skim::fuzzy_match(s, &self.0).is_some()
-    }
-}
-
-fn run(dir: PathBuf, matcher: impl Matcher) {
-    let mut addrs = HashMap::new();
-
-    for entry in WalkDir::new(dir) {
-        let entry = match entry {
-            Ok(entry) => entry,
-            Err(e) => {
-                eprintln!("Dir error: {}", e);
-                continue;
-            }
-        };
-
-        if entry.file_type().is_dir() {
-            continue;
+fn process_mails(
+    matcher: impl Matcher,
+    receiver: Receiver<ProcessInput>,
+    sender: Sender<ProcessOutput>,
+) {
+    while let Ok(paths) = receiver.recv() {
+        for path in paths {
+            let _ = process_mail(path, &matcher, &sender);
         }
+    }
+}
 
-        match process(&mut addrs, entry.path(), &matcher) {
-            Ok(_) => {}
-            Err(_e) => {
-                //eprintln!("Process error: {}", e);
-                continue;
+fn process_results(receiver: Receiver<ProcessOutput>, matcher: impl Matcher) {
+    let mut addrs = HashMap::new();
+    while let Ok(addr) = receiver.recv() {
+        let data = addrs
+            .entry(addr.addr.to_owned())
+            .or_insert(AddrData::default());
+        data.occurences += 1;
+        if let Some(name) = &addr.display_name {
+            if matcher.matches(name) {
+                *data.name_variants.entry(name.to_owned()).or_insert(0) += 1;
             }
         }
     }
@@ -169,6 +199,30 @@ fn run(dir: PathBuf, matcher: impl Matcher) {
 
         let _ = writeln!(stdout, "{}\t{}", addr, name_variant);
     }
+}
+
+fn run(dir: PathBuf, matcher: impl Matcher) {
+    let num_threads = num_cpus::get();
+    let (path_sender, path_receiver) = bounded(num_threads);
+    let (addrinfo_sender, addrinfo_receiver) = bounded(num_threads);
+
+    for _ in 0..num_threads {
+        let m = matcher.clone();
+        let s = addrinfo_sender.clone();
+        let r = path_receiver.clone();
+        let _ = std::thread::spawn(move || process_mails(m, r, s));
+    }
+
+    let result_thread = std::thread::spawn(|| {
+        process_results(addrinfo_receiver, matcher);
+    });
+
+    std::mem::drop(path_receiver);
+    std::mem::drop(addrinfo_sender);
+
+    find_mails(dir, path_sender);
+
+    result_thread.join().unwrap();
 }
 
 fn main() {

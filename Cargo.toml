@@ -6,8 +6,8 @@ edition = "2018"
 description = "maildir-address-query: Collect and query mail addresses from maildirs"
 license = "MIT"
 
-#[profile.release]
-#debug = true #for profiling
+[profile.release]
+debug = true #for profiling
 
 [dependencies]
 mailparse = "0.10"
@@ -15,3 +15,5 @@ walkdir = "2.3"
 structopt = "0.3"
 bstr = "0.2"
 fuzzy-matcher = "0.3"
+crossbeam-channel = "0.4"
+num_cpus = "1.12"

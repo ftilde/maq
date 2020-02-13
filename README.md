@@ -9,6 +9,7 @@ Compared to [mail-query](https://github.com/pbrisbin/mail-query) it has the foll
 * The most frequent variation is used as the display name
 * Search ergonomics can be improved using the `--fuzzy` and `--ignore-case` flags
 * 7-bit ASCII encoded MIME-headers are decoded automatically
+* Mail processing is parallelized and thus (depending on your hardware) faster
 
 In contrast to mail-query, maq does not (yet?) support regex search.
 
