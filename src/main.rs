@@ -93,7 +93,7 @@ fn find_mails(dir: PathBuf, sender: Sender<ProcessInput>) {
             continue;
         }
 
-        batch.push(entry.path().to_path_buf());
+        batch.push(entry.into_path());
         if batch.len() == batch_size {
             sender.send(batch).expect("Receivers outlive sender");
 
@@ -204,6 +204,10 @@ fn run(dir: PathBuf, matcher: impl Matcher) {
     let (path_sender, path_receiver) = bounded(num_threads);
     let (addrinfo_sender, addrinfo_receiver) = bounded(num_threads);
 
+    let _ = std::thread::spawn(|| {
+        find_mails(dir, path_sender);
+    });
+
     for _ in 0..num_threads {
         let m = matcher.clone();
         let s = addrinfo_sender.clone();
@@ -211,16 +215,10 @@ fn run(dir: PathBuf, matcher: impl Matcher) {
         let _ = std::thread::spawn(move || process_mails(m, r, s));
     }
 
-    let result_thread = std::thread::spawn(|| {
-        process_results(addrinfo_receiver);
-    });
-
     std::mem::drop(path_receiver);
     std::mem::drop(addrinfo_sender);
 
-    find_mails(dir, path_sender);
-
-    result_thread.join().unwrap();
+    process_results(addrinfo_receiver);
 }
 
 fn main() {
