@@ -2,11 +2,11 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use structopt::StructOpt;
 
-mod generic;
-mod io_uring;
+mod generic_backend;
+mod io_uring_backend;
 
-use generic::GenericBackend;
-use io_uring::IoUringBackend;
+use generic_backend::GenericBackend;
+use io_uring_backend::IoUringBackend;
 
 #[derive(StructOpt)]
 #[structopt(author, about)]
