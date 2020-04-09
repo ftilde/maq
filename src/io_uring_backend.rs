@@ -24,7 +24,7 @@ const SIZE_POW: usize = 5;
 
 impl IoUringBackend {
     pub fn is_supported() -> bool {
-        true //TODO detect support
+        false //TODO detect support
     }
 }
 
