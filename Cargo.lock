@@ -206,6 +206,7 @@ dependencies = [
  "fuzzy-matcher",
  "io-uring",
  "lazy_static",
+ "libc",
  "mailparse",
  "num_cpus",
  "structopt",

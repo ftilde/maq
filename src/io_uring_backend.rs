@@ -101,7 +101,7 @@ async fn open(path: &Path) -> std::io::Result<File> {
     let path = path.as_os_str();
     let path = CString::new(OsStrExt::as_bytes(path)).unwrap();
 
-    let op = Openat::new(0.into(), path.as_ref().as_ptr()).build();
+    let op = Openat::new(Target::Fd(libc::AT_FDCWD), path.as_ref().as_ptr()).build();
 
     IouOp::new(op)
         .await
