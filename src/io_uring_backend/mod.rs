@@ -69,7 +69,7 @@ async fn process_mail(path: &Path, matcher: &impl Matcher, addr_collection: &Ref
             let byte = buf[pos];
             state = advance_state(byte, pos, state);
             match state {
-                ParseState::End => return Ok(()),
+                ParseState::End => break 'outer,
                 ParseState::FoundAddr{ begin } => {
                     if let Ok((addrs, next_pos)) = parse_header_line(&buf[begin..], matcher.clone()) {
                         state = ParseState::Begin;
