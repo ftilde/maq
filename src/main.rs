@@ -1,7 +1,7 @@
-use std::collections::HashMap;
 use std::path::PathBuf;
 use structopt::StructOpt;
 
+mod common;
 mod generic_backend;
 mod io_uring_backend;
 
@@ -26,21 +26,13 @@ struct Options {
         help = "Apply fuzzy matching (instead of absolute)"
     )]
     fuzzy: bool,
+    #[structopt(long = "generic-backend", help = "Force generic backend")]
+    generic_backend: bool,
     #[structopt(help = "base directory for recursive mail search", parse(from_os_str))]
     dir: PathBuf,
 }
 
-#[derive(Default)]
-struct AddrData {
-    name_variants: HashMap<String, u64>,
-    occurences: u64,
-}
-
-fn to_io_err<I>(_: I) -> std::io::Error {
-    std::io::Error::from(std::io::ErrorKind::InvalidInput)
-}
-
-trait Matcher: Clone + Send + 'static {
+pub trait Matcher: Clone + Send + 'static {
     fn new(pattern: String) -> Self;
     fn matches(&self, s: &str) -> bool;
 }
@@ -82,9 +74,7 @@ trait Backend {
     fn run(dir: PathBuf, matcher: impl Matcher);
 }
 
-fn run_backend<B: Backend>() {
-    let options = Options::from_args();
-
+fn run_backend<B: Backend>(options: Options) {
     // Somewhat ugly, but what we need for static dispatch
     if options.fuzzy {
         if options.ignore_case {
@@ -108,9 +98,10 @@ fn run_backend<B: Backend>() {
 }
 
 fn main() {
-    if IoUringBackend::is_supported() {
-        run_backend::<IoUringBackend>();
+    let options = Options::from_args();
+    if !options.generic_backend && IoUringBackend::is_supported() {
+        run_backend::<IoUringBackend>(options);
     } else {
-        run_backend::<GenericBackend>();
+        run_backend::<GenericBackend>(options);
     }
 }

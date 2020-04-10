@@ -1,29 +1,16 @@
-use crate::{to_io_err, AddrData, Backend, Matcher};
+use crate::common::{find_mails, parse_header_line, AddrCollection};
+use crate::{Backend, Matcher};
 use bstr::io::BufReadExt;
 use crossbeam_channel::{bounded, Receiver, Sender};
-use mailparse::{addrparse, parse_header, MailAddr, SingleInfo};
-use std::collections::HashMap;
-use std::io::{BufReader, Write};
+use mailparse::SingleInfo;
+use std::io::BufReader;
 use std::path::PathBuf;
-use walkdir::WalkDir;
 
-fn find_mails(dir: PathBuf, sender: Sender<ProcessInput>) {
+fn find_and_batch_mails(dir: PathBuf, sender: Sender<ProcessInput>) {
     let batch_size = 64;
     let mut batch = Vec::with_capacity(batch_size);
-    for entry in WalkDir::new(dir) {
-        let entry = match entry {
-            Ok(entry) => entry,
-            Err(e) => {
-                eprintln!("Dir error: {}", e);
-                continue;
-            }
-        };
-
-        if entry.file_type().is_dir() {
-            continue;
-        }
-
-        batch.push(entry.into_path());
+    for mail in find_mails(dir) {
+        batch.push(mail);
         if batch.len() == batch_size {
             sender.send(batch).expect("Receivers outlive sender");
 
@@ -61,23 +48,11 @@ fn process_mail(
             || line.len() > 5 && &line[0..5] == b"BCC: ";
 
         if is_addr_line {
-            let header = parse_header(&line).map_err(to_io_err)?;
-            for addr in &*addrparse(&header.0.get_value().map_err(to_io_err)?).map_err(to_io_err)? {
-                let addr = match addr {
-                    MailAddr::Single(a) => a,
-                    MailAddr::Group(_) => return Ok(false),
-                };
-                if matcher.matches(&addr.addr)
-                    || addr
-                        .display_name
-                        .as_ref()
-                        .map(|n| matcher.matches(n))
-                        .unwrap_or(false)
-                {
-                    sender
-                        .send(addr.clone())
-                        .expect("Receiver outlives senders");
-                }
+            let (addrs, _) = parse_header_line(&line, matcher.clone())?;
+            for addr in addrs {
+                sender
+                    .send(addr.clone())
+                    .expect("Receiver outlives senders");
             }
         }
         Ok(true)
@@ -98,35 +73,12 @@ fn process_mails(
 }
 
 fn process_results(receiver: Receiver<ProcessOutput>) {
-    let mut addrs = HashMap::new();
+    let mut addrs = AddrCollection::new();
     while let Ok(addr) = receiver.recv() {
-        let data = addrs
-            .entry(addr.addr.to_owned())
-            .or_insert(AddrData::default());
-        data.occurences += 1;
-        if let Some(name) = &addr.display_name {
-            *data.name_variants.entry(name.to_owned()).or_insert(0) += 1;
-        }
+        addrs.add(addr);
     }
 
-    let mut addrs = addrs.into_iter().collect::<Vec<_>>();
-    // Sort (reverse) so that high number of occurences are on top
-    addrs.sort_by_key(|(_, data)| u64::max_value() - data.occurences);
-
-    let stdout = std::io::stdout();
-    let mut stdout = stdout.lock();
-
-    let _ = writeln!(stdout, "");
-    for (addr, data) in addrs {
-        let name_variant = data
-            .name_variants
-            .iter()
-            .max_by_key(|(_, n)| *n)
-            .map(|(name, _)| name.as_str())
-            .unwrap_or("");
-
-        let _ = writeln!(stdout, "{}\t{}", addr, name_variant);
-    }
+    addrs.print();
 }
 
 pub struct GenericBackend;
@@ -138,7 +90,7 @@ impl Backend for GenericBackend {
         let (addrinfo_sender, addrinfo_receiver) = bounded(num_threads);
 
         let _ = std::thread::spawn(|| {
-            find_mails(dir, path_sender);
+            find_and_batch_mails(dir, path_sender);
         });
 
         for _ in 0..num_threads {

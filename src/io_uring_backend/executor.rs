@@ -1,4 +1,3 @@
-use crate::{Backend, Matcher};
 use core::cell::Cell;
 use core::pin::Pin;
 use core::sync::atomic::AtomicU64;
@@ -10,23 +9,13 @@ use io_uring::squeue::Entry;
 use lazy_static::lazy_static;
 use std::collections::HashMap;
 use std::ffi::CString;
-use std::fs::File;
 use std::future::Future;
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::io::{AsRawFd, FromRawFd, IntoRawFd};
 use std::path::Path;
-use std::path::PathBuf;
 use std::sync::atomic::Ordering;
 
-pub struct IoUringBackend;
-
-const SIZE_POW: usize = 5;
-
-impl IoUringBackend {
-    pub fn is_supported() -> bool {
-        false //TODO detect support
-    }
-}
+const SIZE_POW: usize = 7;
 
 fn convert_result(ret: i32) -> std::io::Result<i32> {
     if ret >= 0 {
@@ -78,8 +67,7 @@ impl Future for IouOp {
                 let op = op.user_data(CURRENT_TASK_ID.with(|i| i.get()).unwrap().0);
                 let sub = IO_URING.submission();
                 let res = unsafe { sub.push(op) };
-                assert!(res.is_ok());
-                IO_URING.submit().unwrap();
+                assert!(res.is_ok(), "Queue is full!");
                 this.state = IouOpState::Submitted;
                 Poll::Pending
             }
@@ -97,7 +85,42 @@ impl Future for IouOp {
     }
 }
 
-async fn open(path: &Path) -> std::io::Result<File> {
+pub struct File {
+    inner: std::fs::File,
+    offset: usize,
+}
+
+impl From<std::fs::File> for File {
+    fn from(inner: std::fs::File) -> Self {
+        File {
+            inner,
+            offset: 0,
+        }
+    }
+}
+
+impl File {
+    #[allow(unused)]
+    pub fn offset(&self) -> usize {
+        self.offset
+    }
+}
+
+impl std::ops::Deref for File {
+    type Target = std::fs::File;
+
+    fn deref(&self) -> &Self::Target {
+        &self.inner
+    }
+}
+
+impl std::ops::DerefMut for File {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.inner
+    }
+}
+
+pub async fn open(path: &Path) -> std::io::Result<File> {
     let path = path.as_os_str();
     let path = CString::new(OsStrExt::as_bytes(path)).unwrap();
 
@@ -105,39 +128,47 @@ async fn open(path: &Path) -> std::io::Result<File> {
 
     IouOp::new(op)
         .await
-        .map(|fd| unsafe { File::from_raw_fd(fd) })
+        .map(|fd| unsafe { std::fs::File::from_raw_fd(fd).into() })
 }
 
-async fn close(file: File) -> std::io::Result<()> {
-    let fd = file.into_raw_fd();
+pub async fn close(file: File) -> std::io::Result<()> {
+    let fd = file.inner.into_raw_fd();
     let op = Close::new(Target::Fd(fd)).build();
 
     IouOp::new(op).await.map(|_| ())
 }
 
-async fn read(file: &mut File, buf: &mut [u8]) -> std::io::Result<usize> {
-    let fd = file.as_raw_fd();
-    let op = Read::new(Target::Fd(fd), buf.as_mut_ptr(), buf.len() as _).build();
+#[allow(unused)]
+pub async fn read(file: &mut File, buf: &mut [u8]) -> std::io::Result<usize> {
+    let fd = file.inner.as_raw_fd();
+    let op = Read::new(Target::Fd(fd), buf.as_mut_ptr(), buf.len() as _).offset(file.offset as _).build();
 
-    IouOp::new(op).await.map(|i| i as usize)
+    match IouOp::new(op).await {
+        Ok(num_written) => {
+            let num_written = num_written as usize;
+            file.offset += num_written;
+            Ok(num_written)
+        }
+        Err(e) => Err(e),
+    }
 }
 
-async fn foo(path: &Path) -> std::io::Result<()> {
-    let mut file = open(path).await?;
+pub async fn read_to_vec(file: &mut File, buf: &mut Vec<u8>, max_to_read: usize) -> std::io::Result<usize> {
+    let fd = file.inner.as_raw_fd();
+    let append_pos = buf.len();
+    let additional_storage = append_pos.saturating_sub(buf.capacity()) + max_to_read;
+    buf.reserve(additional_storage);
+    let write_pos = unsafe { buf.as_mut_ptr().add(append_pos) };
+    let op = Read::new(Target::Fd(fd), write_pos, max_to_read as _).offset(file.offset as _).build();
 
-    let mut buf = vec![0u8; 256];
-    let _num_read = read(&mut file, &mut buf).await?;
-
-    println!("{}", String::from_utf8_lossy(&buf));
-
-    close(file).await?;
-
-    Ok(())
-}
-
-async fn bar(path: &Path) {
-    if let Err(e) = foo(path).await {
-        eprintln!("Error: {}", e);
+    match IouOp::new(op).await {
+        Ok(num_written) => {
+            let num_written = num_written as usize;
+            unsafe { buf.set_len(append_pos + num_written) };
+            file.offset += num_written;
+            Ok(num_written)
+        },
+        Err(e) => Err(e),
     }
 }
 
@@ -184,20 +215,20 @@ impl<'future> Task<'future> {
     }
 }
 
-struct Executor<'tasks> {
+pub struct Executor<'tasks> {
     tasks: HashMap<TaskId, Task<'tasks>>,
     waker: Waker,
 }
 
 impl<'tasks> Executor<'tasks> {
-    fn new() -> Self {
+    pub fn new() -> Self {
         Executor {
             tasks: HashMap::new(),
             waker: dummy_waker(),
         }
     }
 
-    fn spawn(&mut self, f: impl Future<Output = ()> + 'tasks) {
+    pub fn spawn(&mut self, f: impl Future<Output = ()> + 'tasks) {
         let mut task = Task::new(f);
 
         let task_id = task.id();
@@ -219,45 +250,40 @@ impl<'tasks> Executor<'tasks> {
             if let Some(res) = IO_URING.completion().pop() {
                 break res;
             }
-            println!("Wait...");
+            IO_URING.submit().unwrap(); //TODO figure out where to submit best
+            //println!("Wait...");
         };
         let id = result.user_data();
         let task_result = result.result();
         (TaskId(id), task_result)
     }
 
-    fn poll(&mut self) {
+    pub fn poll(&mut self) -> Poll<()> {
         let (task_id, result) = self.next_result();
         let task = self.tasks.get_mut(&task_id).expect("Invalid task id");
 
         CURRENT_RESULT.with(|r| r.set(Some(result)));
         CURRENT_TASK_ID.with(|r| r.set(Some(task_id)));
 
-        eprintln!("Running id {}", task_id.0);
+        //eprintln!("Running id {}", task_id.0);
 
         let mut context = Context::from_waker(&self.waker);
         match task.future.as_mut().poll(&mut context) {
-            Poll::Pending => {}
-            Poll::Ready(_) => {
+            r @ Poll::Pending => r,
+            r @ Poll::Ready(_) => {
                 self.tasks.remove(&task_id).expect("Invalid task_id");
+                r
             }
         }
     }
 
-    fn run(&mut self) {
-        while !self.tasks.is_empty() {
-            self.poll();
-        }
-    }
-}
+    //pub fn run(&mut self) {
+    //    while self.has_tasks() {
+    //        let _ = self.poll();
+    //    }
+    //}
 
-impl Backend for IoUringBackend {
-    fn run(_dir: PathBuf, _matcher: impl Matcher) {
-        let mut executor = Executor::new();
-
-        executor.spawn(bar(Path::new("/home/dominik/foo.c")));
-        executor.spawn(bar(Path::new("/home/dominik/foo.txt")));
-
-        executor.run();
+    pub fn has_tasks(&self) -> bool {
+        !self.tasks.is_empty()
     }
 }
