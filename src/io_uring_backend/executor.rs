@@ -92,10 +92,7 @@ pub struct File {
 
 impl From<std::fs::File> for File {
     fn from(inner: std::fs::File) -> Self {
-        File {
-            inner,
-            offset: 0,
-        }
+        File { inner, offset: 0 }
     }
 }
 
@@ -141,7 +138,9 @@ pub async fn close(file: File) -> std::io::Result<()> {
 #[allow(unused)]
 pub async fn read(file: &mut File, buf: &mut [u8]) -> std::io::Result<usize> {
     let fd = file.inner.as_raw_fd();
-    let op = Read::new(Target::Fd(fd), buf.as_mut_ptr(), buf.len() as _).offset(file.offset as _).build();
+    let op = Read::new(Target::Fd(fd), buf.as_mut_ptr(), buf.len() as _)
+        .offset(file.offset as _)
+        .build();
 
     match IouOp::new(op).await {
         Ok(num_written) => {
@@ -153,13 +152,19 @@ pub async fn read(file: &mut File, buf: &mut [u8]) -> std::io::Result<usize> {
     }
 }
 
-pub async fn read_to_vec(file: &mut File, buf: &mut Vec<u8>, max_to_read: usize) -> std::io::Result<usize> {
+pub async fn read_to_vec(
+    file: &mut File,
+    buf: &mut Vec<u8>,
+    max_to_read: usize,
+) -> std::io::Result<usize> {
     let fd = file.inner.as_raw_fd();
     let append_pos = buf.len();
     let additional_storage = append_pos.saturating_sub(buf.capacity()) + max_to_read;
     buf.reserve(additional_storage);
     let write_pos = unsafe { buf.as_mut_ptr().add(append_pos) };
-    let op = Read::new(Target::Fd(fd), write_pos, max_to_read as _).offset(file.offset as _).build();
+    let op = Read::new(Target::Fd(fd), write_pos, max_to_read as _)
+        .offset(file.offset as _)
+        .build();
 
     match IouOp::new(op).await {
         Ok(num_written) => {
@@ -167,7 +172,7 @@ pub async fn read_to_vec(file: &mut File, buf: &mut Vec<u8>, max_to_read: usize)
             unsafe { buf.set_len(append_pos + num_written) };
             file.offset += num_written;
             Ok(num_written)
-        },
+        }
         Err(e) => Err(e),
     }
 }
@@ -251,7 +256,7 @@ impl<'tasks> Executor<'tasks> {
                 break res;
             }
             IO_URING.submit().unwrap(); //TODO figure out where to submit best
-            //println!("Wait...");
+                                        //println!("Wait...");
         };
         let id = result.user_data();
         let task_result = result.result();

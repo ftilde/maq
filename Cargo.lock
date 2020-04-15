@@ -206,6 +206,7 @@ dependencies = [
  "lazy_static",
  "libc",
  "mailparse",
+ "memchr",
  "num_cpus",
  "structopt",
  "walkdir",
