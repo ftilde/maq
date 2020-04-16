@@ -1,13 +1,12 @@
+use core::sync::atomic::AtomicUsize;
 use core::cell::Cell;
 use core::pin::Pin;
-use core::sync::atomic::AtomicU64;
 use core::task::Context;
 use core::task::Poll;
 use core::task::{RawWaker, RawWakerVTable, Waker};
 use io_uring::opcode::{types::Target, Close, Openat, Read};
 use io_uring::squeue::Entry;
 use lazy_static::lazy_static;
-use std::collections::HashMap;
 use std::ffi::CString;
 use std::future::Future;
 use std::os::unix::ffi::OsStrExt;
@@ -15,7 +14,104 @@ use std::os::unix::io::{AsRawFd, FromRawFd, IntoRawFd};
 use std::path::Path;
 use std::sync::atomic::Ordering;
 
-const SIZE_POW: usize = 7;
+const QUEUE_SIZE_POW: usize = 8;
+const QUEUE_SIZE: usize = 1 << QUEUE_SIZE_POW;
+
+struct AtomicFixedStorage<T> {
+    storage: Box<[AtomicUsize]>,
+    next_free: AtomicUsize,
+    num_elms: AtomicUsize,
+    _marker: std::marker::PhantomData<T>,
+}
+
+const NO_MORE_STORAGE: usize = std::usize::MAX;
+
+impl<T> AtomicFixedStorage<T> {
+    fn new(size: usize) -> Self {
+        let mut storage = Vec::new();
+        for i in 1..size {
+            storage.push(AtomicUsize::new(i));
+        }
+        storage.push(AtomicUsize::new(NO_MORE_STORAGE));
+        AtomicFixedStorage {
+            storage: storage.into_boxed_slice(),
+            next_free: AtomicUsize::new(0),
+            num_elms: AtomicUsize::new(0),
+            _marker: std::marker::PhantomData,
+        }
+    }
+
+    fn num_elms(&self) -> usize {
+        self.num_elms.load(Ordering::SeqCst)
+    }
+
+    fn allocate(&self) -> Option<StorageID> {
+        self.num_elms.fetch_add(1, Ordering::SeqCst);
+        loop {
+            let old = self.next_free.load(Ordering::SeqCst);
+            if old == NO_MORE_STORAGE {
+                self.num_elms.fetch_sub(1, Ordering::SeqCst);
+                return None;
+            }
+            let new = self.storage[old].load(Ordering::SeqCst);
+            if self.next_free.compare_and_swap(old, new, Ordering::SeqCst) == old {
+                self.storage[old].store(0, Ordering::SeqCst);
+                return Some(StorageID(old));
+            }
+        }
+    }
+
+    unsafe fn free(&self, id: StorageID) {
+        let _ = self.get_usize(id).map(|p| Box::from_raw(p as *mut T)); // drop if present
+
+        loop {
+            let old = self.next_free.load(Ordering::SeqCst);
+            self.storage[id.0].store(old, Ordering::SeqCst);
+
+            let new = id.0;
+
+            if self.next_free.compare_and_swap(old, new, Ordering::SeqCst) == old {
+                break;
+            }
+        }
+
+        self.num_elms.fetch_sub(1, Ordering::SeqCst);
+    }
+
+    unsafe fn set(&self, id: StorageID, val: Box<T>) {
+        let _ = self.replace(id, val);
+    }
+
+    unsafe fn replace(&self, id: StorageID, val: Box<T>) -> Option<Box<T>> {
+        let old = self.get_usize(id).map(|p| Box::from_raw(p as _));
+        self.storage[id.0].store(Box::into_raw(val) as usize, Ordering::SeqCst);
+        old
+    }
+
+    fn get_usize(&self, id: StorageID) -> Option<usize> {
+        match self.storage[id.0].load(Ordering::SeqCst) {
+            0 => None,
+            p => Some(p)
+        }
+    }
+
+    //unsafe fn get(&self, id: StorageID) -> Option<&T> {
+    //    self.get_usize(id).map(|p| &*(p as *const T))
+    //}
+
+    unsafe fn get_mut(&self, id: StorageID) -> Option<&mut T> {
+        self.get_usize(id).map(|p| &mut *(p as *mut T))
+    }
+}
+
+impl<T> Drop for AtomicFixedStorage<T> {
+    fn drop(&mut self) {
+        //TODO for now we just leak, meh...
+    }
+}
+
+#[derive(Copy, Clone, Debug)]
+pub struct StorageID(usize);
 
 fn convert_result(ret: i32) -> std::io::Result<i32> {
     if ret >= 0 {
@@ -38,7 +134,7 @@ impl IouOp {
 }
 
 thread_local! {
-    static CURRENT_TASK_ID: Cell<Option<TaskId>> = Cell::new(None);
+    static CURRENT_TASK_ID: Cell<Option<StorageID>> = Cell::new(None);
     static CURRENT_RESULT: Cell<Option<i32>> = Cell::new(None);
 }
 
@@ -50,9 +146,12 @@ enum IouOpState {
 
 lazy_static! {
     static ref IO_URING: io_uring::concurrent::IoUring = {
-        let num_entries = 1 << SIZE_POW;
-        let uring = io_uring::IoUring::new(num_entries).unwrap();
+        let uring = io_uring::IoUring::new(QUEUE_SIZE as _).unwrap();
         uring.concurrent()
+    };
+
+    pub static ref EXECUTOR: Executor<'static> = {
+        Executor::new()
     };
 }
 
@@ -64,8 +163,13 @@ impl Future for IouOp {
         std::mem::swap(&mut this.state, &mut tmp);
         match tmp {
             IouOpState::Inactive(op) => {
-                let op = op.user_data(CURRENT_TASK_ID.with(|i| i.get()).unwrap().0);
+                let op = op.user_data(CURRENT_TASK_ID.with(|i| i.get()).unwrap().0 as _);
                 let sub = IO_URING.submission();
+                //match unsafe { sub.push(op) } {
+                //    Ok(_) => this.state = IouOpState::Submitted,
+                //    Err(op) => this.state = IouOpState::Inactive(op),
+                //}
+                //Poll::Pending
                 let res = unsafe { sub.push(op) };
                 assert!(res.is_ok(), "Queue is full!");
                 this.state = IouOpState::Submitted;
@@ -157,14 +261,16 @@ pub async fn read_to_vec(
     buf: &mut Vec<u8>,
     max_to_read: usize,
 ) -> std::io::Result<usize> {
-    let fd = file.inner.as_raw_fd();
     let append_pos = buf.len();
-    let additional_storage = append_pos.saturating_sub(buf.capacity()) + max_to_read;
-    buf.reserve(additional_storage);
-    let write_pos = unsafe { buf.as_mut_ptr().add(append_pos) };
-    let op = Read::new(Target::Fd(fd), write_pos, max_to_read as _)
-        .offset(file.offset as _)
-        .build();
+    let op = {
+        let fd = file.inner.as_raw_fd();
+        let additional_storage = append_pos.saturating_sub(buf.capacity()) + max_to_read;
+        buf.reserve(additional_storage);
+        let write_pos = unsafe { buf.as_mut_ptr().add(append_pos) };
+            Read::new(Target::Fd(fd), write_pos, max_to_read as _)
+            .offset(file.offset as _)
+            .build()
+    };
 
     match IouOp::new(op).await {
         Ok(num_written) => {
@@ -192,94 +298,92 @@ fn dummy_waker() -> Waker {
     unsafe { Waker::from_raw(raw) }
 }
 
-#[derive(Copy, Clone, Hash, PartialEq, Debug, Eq)]
-struct TaskId(u64);
-
-impl TaskId {
-    fn new() -> Self {
-        static NEXT_ID: AtomicU64 = AtomicU64::new(0);
-        TaskId(NEXT_ID.fetch_add(1, Ordering::Relaxed))
-    }
-}
-
 struct Task<'future> {
-    id: TaskId,
-    future: Pin<Box<dyn Future<Output = ()> + 'future>>,
+    future: Pin<Box<dyn Future<Output = ()> + 'future + Send + Sync>>,
 }
 
 impl<'future> Task<'future> {
-    fn new(f: impl Future<Output = ()> + 'future) -> Task<'future> {
+    fn new(f: impl Future<Output = ()> + 'future + Send + Sync) -> Task<'future> {
         Task {
-            id: TaskId::new(),
             future: Box::pin(f),
         }
-    }
-
-    fn id(&self) -> TaskId {
-        self.id
     }
 }
 
 pub struct Executor<'tasks> {
-    tasks: HashMap<TaskId, Task<'tasks>>,
+    tasks: AtomicFixedStorage<Task<'tasks>>,
     waker: Waker,
 }
 
 impl<'tasks> Executor<'tasks> {
-    pub fn new() -> Self {
+    fn new() -> Self {
         Executor {
-            tasks: HashMap::new(),
+            tasks: AtomicFixedStorage::new(QUEUE_SIZE/2),
             waker: dummy_waker(),
         }
     }
 
-    pub fn spawn(&mut self, f: impl Future<Output = ()> + 'tasks) {
-        let mut task = Task::new(f);
+    pub fn spawn(&self, f: impl Future<Output = ()> + 'tasks + Send + Sync) -> Result<Poll<StorageID>,()>{
+        unsafe {
+            let id = self.tasks.allocate().ok_or(())?;
+            Ok(self.spawn_at(id, f))
+        }
+    }
+    pub unsafe fn spawn_at(&self, id: StorageID, f: impl Future<Output = ()> + 'tasks + Send + Sync) -> Poll<StorageID> {
+        let task = Task::new(f);
+        self.tasks.set(id, Box::new(task));
 
-        let task_id = task.id();
-
-        CURRENT_TASK_ID.with(|r| r.set(Some(task_id)));
+        CURRENT_TASK_ID.with(|r| r.set(Some(id)));
 
         let mut context = Context::from_waker(&self.waker);
+        let task = self.tasks.get_mut(id).unwrap();
         match task.future.as_mut().poll(&mut context) {
-            Poll::Pending => {}
-            Poll::Ready(_) => return,
+            Poll::Pending => Poll::Pending,
+            Poll::Ready(_) => Poll::Ready(id),
         }
-
-        let prev = self.tasks.insert(task_id, task);
-        assert!(prev.is_none(), "Id somehow reused");
     }
 
-    fn next_result(&mut self) -> (TaskId, i32) {
+    fn next_result(&self) -> Option<(StorageID, i32)> {
         let result = loop {
             if let Some(res) = IO_URING.completion().pop() {
                 break res;
             }
             IO_URING.submit().unwrap(); //TODO figure out where to submit best
-                                        //println!("Wait...");
+            if let Some(res) = IO_URING.completion().pop() {
+                break res;
+            } else {
+                return None;
+            }
         };
         let id = result.user_data();
+        //eprintln!("ID: {}", id);
         let task_result = result.result();
-        (TaskId(id), task_result)
+        Some((StorageID(id as _), task_result))
     }
 
-    pub fn poll(&mut self) -> Poll<()> {
-        let (task_id, result) = self.next_result();
-        let task = self.tasks.get_mut(&task_id).expect("Invalid task id");
+    pub fn poll(&self) -> Option<Poll<StorageID>> {
+        let (id, result) = self.next_result()?;
+        //let mut task = loop {
+        //    if let Some(t) = self.tasks.get_mut(&task_id) {
+        //        break t;
+        //    }
+        //};
+        let task = unsafe { self.tasks.get_mut(id).unwrap() };
 
         CURRENT_RESULT.with(|r| r.set(Some(result)));
-        CURRENT_TASK_ID.with(|r| r.set(Some(task_id)));
+        CURRENT_TASK_ID.with(|r| r.set(Some(id)));
 
         //eprintln!("Running id {}", task_id.0);
 
         let mut context = Context::from_waker(&self.waker);
         match task.future.as_mut().poll(&mut context) {
-            r @ Poll::Pending => r,
-            r @ Poll::Ready(_) => {
-                self.tasks.remove(&task_id).expect("Invalid task_id");
-                r
-            }
+            Poll::Pending => Some(Poll::Pending),
+            Poll::Ready(_) => Some(Poll::Ready(id)),
         }
+    }
+
+    pub unsafe fn dispose(&self, id: StorageID) {
+        self.tasks.free(id)
     }
 
     //pub fn run(&mut self) {
@@ -289,6 +393,6 @@ impl<'tasks> Executor<'tasks> {
     //}
 
     pub fn has_tasks(&self) -> bool {
-        !self.tasks.is_empty()
+        self.tasks.num_elms() > 0
     }
 }

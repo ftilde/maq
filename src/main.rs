@@ -32,7 +32,7 @@ struct Options {
     dir: PathBuf,
 }
 
-pub trait Matcher: Clone + Send + 'static {
+pub trait Matcher: Clone + Send + 'static + Sync {
     fn new(pattern: String) -> Self;
     fn matches(&self, s: &str) -> bool;
 }
