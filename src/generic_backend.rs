@@ -1,9 +1,9 @@
-use crate::common::{find_mails, parse_header_line, AddrCollection};
+use crate::common::{
+    find_mails, process_mail_header, AddrCollection, HeaderParseResult, ProcessOutput,
+};
 use crate::{Backend, Matcher};
-use bstr::io::BufReadExt;
 use crossbeam_channel::{bounded, Receiver, Sender};
-use mailparse::SingleInfo;
-use std::io::BufReader;
+use std::io::Read;
 use std::path::PathBuf;
 
 fn find_and_batch_mails(dir: PathBuf, sender: Sender<ProcessInput>) {
@@ -21,42 +21,30 @@ fn find_and_batch_mails(dir: PathBuf, sender: Sender<ProcessInput>) {
 }
 
 type ProcessInput = Vec<PathBuf>;
-type ProcessOutput = SingleInfo;
 
 fn process_mail(
     p: PathBuf,
     matcher: &impl Matcher,
     sender: &Sender<ProcessOutput>,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let file = std::fs::File::open(p)?;
+    let mut file = std::fs::File::open(p)?;
     let expected_header_size = 4 * 1024; // 4KB
-    let reader = BufReader::with_capacity(expected_header_size, file);
 
-    reader.for_byte_line(|line| {
-        if line.is_empty() {
-            // Empty line: End of mail header
-            return Ok(false);
+    let mut buf = Vec::new();
+    let mut total_read = 0;
+    let mut pos = 0;
+    loop {
+        buf.resize(total_read + expected_header_size, 0);
+        let num_read = file.read(&mut buf[total_read..])?;
+        if num_read == 0 {
+            break;
         }
-        /* TODO: use sub slice patterns when stable in 1.42
-        let is_addr_line = match line.as_slice() {
-            [b'F', b'r', b'o', b'm', b':', b' ', ..] => true,
-            _ => false,
-        };*/
-        let is_addr_line = line.len() > 6 && &line[0..6] == b"From: "
-            || line.len() > 4 && &line[0..4] == b"To: "
-            || line.len() > 4 && &line[0..4] == b"CC: "
-            || line.len() > 5 && &line[0..5] == b"BCC: ";
-
-        if is_addr_line {
-            let (addrs, _) = parse_header_line(&line, matcher.clone())?;
-            for addr in addrs {
-                sender
-                    .send(addr.clone())
-                    .expect("Receiver outlives senders");
-            }
+        total_read += num_read;
+        match process_mail_header(&buf[..total_read], &mut pos, matcher, &sender) {
+            HeaderParseResult::Done => break,
+            HeaderParseResult::NeedMore => {}
         }
-        Ok(true)
-    })?;
+    }
     Ok(())
 }
 

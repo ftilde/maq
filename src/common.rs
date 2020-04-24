@@ -1,4 +1,5 @@
 use crate::Matcher;
+use crossbeam_channel::Sender;
 use mailparse::{addrparse, parse_header, MailAddr, SingleInfo};
 use std::collections::HashMap;
 use std::io::Write;
@@ -25,6 +26,52 @@ pub fn find_mails(dir: PathBuf) -> impl Iterator<Item = PathBuf> {
 
 fn to_io_err<I>(_: I) -> std::io::Error {
     std::io::Error::from(std::io::ErrorKind::InvalidInput)
+}
+
+pub enum HeaderParseResult {
+    NeedMore,
+    Done,
+}
+pub type ProcessOutput = SingleInfo;
+
+pub fn process_mail_header(
+    buf: &[u8],
+    pos: &mut usize,
+    matcher: &impl Matcher,
+    sender: &Sender<ProcessOutput>,
+) -> HeaderParseResult {
+    const MIN_OFFSET: usize = 5;
+    while *pos + MIN_OFFSET < buf.len() {
+        let interesting = match buf[*pos..] {
+            [b'F', b'r', b'o', b'm', b':', ..] => true,
+            [b'T', b'o', b':', ..] => true,
+            [b'C', b'C', b':', ..] => true,
+            [b'B', b'C', b'C', b':', ..] => true,
+            [b'\n', ..] => return HeaderParseResult::Done,
+            _ => false,
+        };
+
+        if interesting {
+            if let Ok((addrs, next_pos)) = parse_header_line(&buf[*pos..], matcher.clone()) {
+                if next_pos == buf.len() {
+                    // Might not be the whole addr line, better read more and try again
+                    return HeaderParseResult::NeedMore;
+                } else {
+                    *pos += next_pos;
+                    for addr in addrs {
+                        sender.send(addr).unwrap();
+                    }
+                    continue;
+                }
+            }
+        }
+        if let Some(next_offset) = memchr::memchr(b'\n', &buf[*pos..]) {
+            *pos += next_offset + 1;
+        } else {
+            return HeaderParseResult::NeedMore;
+        }
+    }
+    HeaderParseResult::NeedMore
 }
 
 pub fn parse_header_line<'matcher>(

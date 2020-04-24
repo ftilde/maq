@@ -6,7 +6,6 @@ use core::task::Poll;
 use core::task::{RawWaker, RawWakerVTable, Waker};
 use io_uring::opcode::{types::Target, Close, Openat, Read};
 use io_uring::squeue::Entry;
-use lazy_static::lazy_static;
 use std::collections::HashMap;
 use std::ffi::CString;
 use std::future::Future;
@@ -14,8 +13,6 @@ use std::os::unix::ffi::OsStrExt;
 use std::os::unix::io::{AsRawFd, FromRawFd, IntoRawFd};
 use std::path::Path;
 use std::sync::atomic::Ordering;
-
-const SIZE_POW: usize = 7;
 
 fn convert_result(ret: i32) -> std::io::Result<i32> {
     if ret >= 0 {
@@ -40,20 +37,13 @@ impl IouOp {
 thread_local! {
     static CURRENT_TASK_ID: Cell<Option<TaskId>> = Cell::new(None);
     static CURRENT_RESULT: Cell<Option<i32>> = Cell::new(None);
+    static IO_URING: Cell<*mut io_uring::IoUring> = Cell::new(std::ptr::null_mut());
 }
 
 enum IouOpState {
     Inactive(Entry),
     Submitted,
     Completed,
-}
-
-lazy_static! {
-    static ref IO_URING: io_uring::concurrent::IoUring = {
-        let num_entries = 1 << SIZE_POW;
-        let uring = io_uring::IoUring::new(num_entries).unwrap();
-        uring.concurrent()
-    };
 }
 
 impl Future for IouOp {
@@ -65,8 +55,18 @@ impl Future for IouOp {
         match tmp {
             IouOpState::Inactive(op) => {
                 let op = op.user_data(CURRENT_TASK_ID.with(|i| i.get()).unwrap().0);
-                let sub = IO_URING.submission();
-                let res = unsafe { sub.push(op) };
+                let uring_ptr = IO_URING.with(|t| t.get());
+                assert!(!uring_ptr.is_null(), "No uring");
+                let uring = unsafe { &mut *uring_ptr };
+                let res = {
+                    let mut sub = uring.submission().available();
+                    unsafe { sub.push(op) }
+                };
+
+                if uring.submission().len() > 0 {
+                    let _foo = uring.submit().unwrap(); //TODO figure out where to submit best
+                                                        //println!("BAR: {}", foo);
+                }
                 assert!(res.is_ok(), "Queue is full!");
                 this.state = IouOpState::Submitted;
                 Poll::Pending
@@ -222,14 +222,18 @@ impl<'future> Task<'future> {
 
 pub struct Executor<'tasks> {
     tasks: HashMap<TaskId, Task<'tasks>>,
+    uring: io_uring::IoUring,
     waker: Waker,
+    queue_size: usize,
 }
 
 impl<'tasks> Executor<'tasks> {
-    pub fn new() -> Self {
+    pub fn new(queue_size: u32) -> Self {
         Executor {
             tasks: HashMap::new(),
+            uring: io_uring::IoUring::new(queue_size).unwrap(),
             waker: dummy_waker(),
+            queue_size: queue_size as usize,
         }
     }
 
@@ -239,6 +243,8 @@ impl<'tasks> Executor<'tasks> {
         let task_id = task.id();
 
         CURRENT_TASK_ID.with(|r| r.set(Some(task_id)));
+        let uring = &mut self.uring;
+        IO_URING.with(|t| t.set(uring as _));
 
         let mut context = Context::from_waker(&self.waker);
         match task.future.as_mut().poll(&mut context) {
@@ -246,17 +252,28 @@ impl<'tasks> Executor<'tasks> {
             Poll::Ready(_) => return,
         }
 
+        IO_URING.with(|t| t.set(std::ptr::null_mut()));
+
         let prev = self.tasks.insert(task_id, task);
         assert!(prev.is_none(), "Id somehow reused");
     }
 
     fn next_result(&mut self) -> (TaskId, i32) {
         let result = loop {
-            if let Some(res) = IO_URING.completion().pop() {
-                break res;
+            {
+                if let Some(res) = self.uring.completion().available().into_iter().next() {
+                    break res;
+                }
             }
-            IO_URING.submit().unwrap(); //TODO figure out where to submit best
-                                        //println!("Wait...");
+            let _foo = self.uring.submit_and_wait(1).unwrap(); //TODO figure out where to submit best
+                                                               //println!("FOO: {}", foo);
+            break self
+                .uring
+                .completion()
+                .available()
+                .into_iter()
+                .next()
+                .unwrap();
         };
         let id = result.user_data();
         let task_result = result.result();
@@ -265,21 +282,26 @@ impl<'tasks> Executor<'tasks> {
 
     pub fn poll(&mut self) -> Poll<()> {
         let (task_id, result) = self.next_result();
+        let uring = &mut self.uring;
         let task = self.tasks.get_mut(&task_id).expect("Invalid task id");
 
         CURRENT_RESULT.with(|r| r.set(Some(result)));
         CURRENT_TASK_ID.with(|r| r.set(Some(task_id)));
+        IO_URING.with(|t| t.set(uring as _));
 
         //eprintln!("Running id {}", task_id.0);
 
         let mut context = Context::from_waker(&self.waker);
-        match task.future.as_mut().poll(&mut context) {
+        let res = match task.future.as_mut().poll(&mut context) {
             r @ Poll::Pending => r,
             r @ Poll::Ready(_) => {
                 self.tasks.remove(&task_id).expect("Invalid task_id");
                 r
             }
-        }
+        };
+
+        IO_URING.with(|t| t.set(std::ptr::null_mut()));
+        res
     }
 
     //pub fn run(&mut self) {
