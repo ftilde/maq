@@ -1,5 +1,4 @@
 use crate::Matcher;
-use crossbeam_channel::Sender;
 use mailparse::{addrparse, parse_header, MailAddr, SingleInfo};
 use std::collections::HashMap;
 use std::io::Write;
@@ -32,13 +31,12 @@ pub enum HeaderParseResult {
     NeedMore,
     Done,
 }
-pub type ProcessOutput = SingleInfo;
 
 pub fn process_mail_header(
     buf: &[u8],
     pos: &mut usize,
     matcher: &impl Matcher,
-    sender: &Sender<ProcessOutput>,
+    addr_collection: &mut AddrCollection,
 ) -> HeaderParseResult {
     const MIN_OFFSET: usize = 5;
     while *pos + MIN_OFFSET < buf.len() {
@@ -59,7 +57,7 @@ pub fn process_mail_header(
                 } else {
                     *pos += next_pos;
                     for addr in addrs {
-                        sender.send(addr).unwrap();
+                        addr_collection.add(addr);
                     }
                     continue;
                 }
@@ -123,6 +121,19 @@ impl AddrCollection {
         data.occurences += 1;
         if let Some(name) = &addr.display_name {
             *data.name_variants.entry(name.to_owned()).or_insert(0) += 1;
+        }
+    }
+
+    pub fn merge(&mut self, other: AddrCollection) {
+        for (addr, other_data) in other.addrs {
+            if let Some(this_data) = self.addrs.get_mut(&addr) {
+                this_data.occurences += other_data.occurences;
+                for (name, occurences) in other_data.name_variants {
+                    *this_data.name_variants.entry(name).or_insert(0) += occurences;
+                }
+            } else {
+                self.addrs.insert(addr, other_data);
+            }
         }
     }
 

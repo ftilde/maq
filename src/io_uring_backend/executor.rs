@@ -224,7 +224,6 @@ pub struct Executor<'tasks> {
     tasks: HashMap<TaskId, Task<'tasks>>,
     uring: io_uring::IoUring,
     waker: Waker,
-    queue_size: usize,
 }
 
 impl<'tasks> Executor<'tasks> {
@@ -233,7 +232,6 @@ impl<'tasks> Executor<'tasks> {
             tasks: HashMap::new(),
             uring: io_uring::IoUring::new(queue_size).unwrap(),
             waker: dummy_waker(),
-            queue_size: queue_size as usize,
         }
     }
 

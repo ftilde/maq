@@ -1,6 +1,4 @@
-use crate::common::{
-    find_mails, process_mail_header, AddrCollection, HeaderParseResult, ProcessOutput,
-};
+use crate::common::{find_mails, process_mail_header, AddrCollection, HeaderParseResult};
 use crate::{Backend, Matcher};
 use crossbeam_channel::{bounded, Receiver, Sender};
 use std::io::Read;
@@ -25,7 +23,7 @@ type ProcessInput = Vec<PathBuf>;
 fn process_mail(
     p: PathBuf,
     matcher: &impl Matcher,
-    sender: &Sender<ProcessOutput>,
+    addrs: &mut AddrCollection,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let mut file = std::fs::File::open(p)?;
     let expected_header_size = 4 * 1024; // 4KB
@@ -40,7 +38,7 @@ fn process_mail(
             break;
         }
         total_read += num_read;
-        match process_mail_header(&buf[..total_read], &mut pos, matcher, &sender) {
+        match process_mail_header(&buf[..total_read], &mut pos, matcher, addrs) {
             HeaderParseResult::Done => break,
             HeaderParseResult::NeedMore => {}
         }
@@ -48,25 +46,14 @@ fn process_mail(
     Ok(())
 }
 
-fn process_mails(
-    matcher: impl Matcher,
-    receiver: Receiver<ProcessInput>,
-    sender: Sender<ProcessOutput>,
-) {
+fn process_mails(matcher: impl Matcher, receiver: Receiver<ProcessInput>) -> AddrCollection {
+    let mut addrs = AddrCollection::new();
     while let Ok(paths) = receiver.recv() {
         for path in paths {
-            let _ = process_mail(path, &matcher, &sender);
+            let _ = process_mail(path, &matcher, &mut addrs);
         }
     }
-}
-
-fn process_results(receiver: Receiver<ProcessOutput>) {
-    let mut addrs = AddrCollection::new();
-    while let Ok(addr) = receiver.recv() {
-        addrs.add(addr);
-    }
-
-    addrs.print();
+    addrs
 }
 
 pub struct GenericBackend;
@@ -75,22 +62,24 @@ impl Backend for GenericBackend {
     fn run(dir: PathBuf, matcher: impl Matcher) {
         let num_threads = num_cpus::get();
         let (path_sender, path_receiver) = bounded(num_threads);
-        let (addrinfo_sender, addrinfo_receiver) = bounded(num_threads);
 
         let _ = std::thread::spawn(|| {
             find_and_batch_mails(dir, path_sender);
         });
 
-        for _ in 0..num_threads {
-            let m = matcher.clone();
-            let s = addrinfo_sender.clone();
-            let r = path_receiver.clone();
-            let _ = std::thread::spawn(move || process_mails(m, r, s));
+        let threads = (1..num_threads)
+            .into_iter()
+            .map(|_| {
+                let m = matcher.clone();
+                let r = path_receiver.clone();
+                std::thread::spawn(move || process_mails(m, r))
+            })
+            .collect::<Vec<_>>();
+
+        let mut addrs = process_mails(matcher, path_receiver);
+        for thread in threads {
+            addrs.merge(thread.join().unwrap());
         }
-
-        std::mem::drop(path_receiver);
-        std::mem::drop(addrinfo_sender);
-
-        process_results(addrinfo_receiver);
+        addrs.print();
     }
 }

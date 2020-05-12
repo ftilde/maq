@@ -1,7 +1,6 @@
-use crate::common::{
-    find_mails, process_mail_header, AddrCollection, HeaderParseResult, ProcessOutput,
-};
+use crate::common::{find_mails, process_mail_header, AddrCollection, HeaderParseResult};
 use crate::{Backend, Matcher};
+use core::cell::RefCell;
 use crossbeam_channel::{bounded, Receiver, Sender};
 use std::path::{Path, PathBuf};
 
@@ -20,7 +19,7 @@ impl IoUringBackend {
 async fn process_mail(
     path: &Path,
     matcher: &impl Matcher,
-    sender: Sender<ProcessOutput>,
+    addr_collection: &RefCell<AddrCollection>,
 ) -> std::io::Result<()> {
     let mut file = open(path).await?;
 
@@ -34,7 +33,8 @@ async fn process_mail(
         if num_read == 0 {
             break;
         }
-        match process_mail_header(&buf, &mut pos, matcher, &sender) {
+        let mut addr_collection = addr_collection.borrow_mut();
+        match process_mail_header(&buf, &mut pos, matcher, &mut *addr_collection) {
             HeaderParseResult::Done => break,
             HeaderParseResult::NeedMore => {}
         }
@@ -45,19 +45,10 @@ async fn process_mail(
     Ok(())
 }
 
-async fn process(path: PathBuf, matcher: &impl Matcher, sender: Sender<ProcessOutput>) {
-    if let Err(e) = process_mail(&path, matcher, sender).await {
+async fn process(path: PathBuf, matcher: &impl Matcher, addrs: &RefCell<AddrCollection>) {
+    if let Err(e) = process_mail(&path, matcher, addrs).await {
         eprintln!("Error: {}", e);
     }
-}
-
-fn process_results(receiver: Receiver<ProcessOutput>) {
-    let mut addrs = AddrCollection::new();
-    while let Ok(addr) = receiver.recv() {
-        addrs.add(addr);
-    }
-
-    addrs.print();
 }
 
 type ProcessInput = Vec<PathBuf>;
@@ -76,11 +67,8 @@ fn find_and_batch_mails(dir: PathBuf, sender: Sender<ProcessInput>) {
     sender.send(batch).expect("Receivers outlive sender");
 }
 
-fn process_mails(
-    matcher: impl Matcher,
-    receiver: Receiver<ProcessInput>,
-    sender: Sender<ProcessOutput>,
-) {
+fn process_mails(matcher: impl Matcher, receiver: Receiver<ProcessInput>) -> AddrCollection {
+    let addrs = RefCell::new(AddrCollection::new());
     let mut batch = Vec::new();
     let mut get_mail = || {
         if batch.is_empty() {
@@ -95,17 +83,19 @@ fn process_mails(
     let mut executor = Executor::new(num_parallel_mails);
     for _ in 0..num_parallel_mails {
         if let Some(m) = get_mail() {
-            executor.spawn(process(m, &matcher, sender.clone()));
+            executor.spawn(process(m, &matcher, &addrs));
         }
     }
 
     while executor.has_tasks() {
         if executor.poll().is_ready() {
             if let Some(m) = get_mail() {
-                executor.spawn(process(m, &matcher, sender.clone()));
+                executor.spawn(process(m, &matcher, &addrs));
             }
         }
     }
+    std::mem::drop(executor);
+    addrs.into_inner()
 }
 
 impl Backend for IoUringBackend {
@@ -113,22 +103,24 @@ impl Backend for IoUringBackend {
         let num_threads = num_cpus::get();
         //let num_threads = 1;
         let (path_sender, path_receiver) = bounded(num_threads);
-        let (addrinfo_sender, addrinfo_receiver) = bounded(num_threads);
 
         let _ = std::thread::spawn(|| {
             find_and_batch_mails(dir, path_sender);
         });
 
-        for _ in 0..num_threads {
-            let m = matcher.clone();
-            let s = addrinfo_sender.clone();
-            let r = path_receiver.clone();
-            let _ = std::thread::spawn(move || process_mails(m, r, s));
+        let threads = (1..num_threads)
+            .into_iter()
+            .map(|_| {
+                let m = matcher.clone();
+                let r = path_receiver.clone();
+                std::thread::spawn(move || process_mails(m, r))
+            })
+            .collect::<Vec<_>>();
+
+        let mut addrs = process_mails(matcher, path_receiver);
+        for thread in threads {
+            addrs.merge(thread.join().unwrap());
         }
-
-        std::mem::drop(path_receiver);
-        std::mem::drop(addrinfo_sender);
-
-        process_results(addrinfo_receiver);
+        addrs.print();
     }
 }
