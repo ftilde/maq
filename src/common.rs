@@ -1,4 +1,5 @@
 use crate::Matcher;
+use core::sync::atomic::{AtomicUsize, Ordering};
 use mailparse::{addrparse, parse_header, MailAddr, SingleInfo};
 use std::collections::HashMap;
 use std::io::Write;
@@ -21,6 +22,30 @@ pub fn find_mails(dir: PathBuf) -> impl Iterator<Item = PathBuf> {
 
         Some(entry.into_path())
     })
+}
+
+pub struct Mails {
+    mails: Vec<PathBuf>,
+    current: AtomicUsize,
+}
+
+impl Mails {
+    pub fn new(dir: PathBuf) -> Self {
+        Mails {
+            mails: find_mails(dir).collect(),
+            current: AtomicUsize::new(0),
+        }
+    }
+    pub fn get(&self) -> Option<PathBuf> {
+        // We could do some unsafe magic here to avoid the clone, but so far this is very much not
+        // a bottle neck.
+        let index = self.current.fetch_add(1, Ordering::SeqCst);
+        if index < self.mails.len() {
+            Some(self.mails[index].clone())
+        } else {
+            None
+        }
+    }
 }
 
 fn to_io_err<I>(_: I) -> std::io::Error {

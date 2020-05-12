@@ -1,24 +1,7 @@
-use crate::common::{find_mails, process_mail_header, AddrCollection, HeaderParseResult};
+use crate::common::{process_mail_header, AddrCollection, HeaderParseResult, Mails};
 use crate::{Backend, Matcher};
-use crossbeam_channel::{bounded, Receiver, Sender};
 use std::io::Read;
 use std::path::PathBuf;
-
-fn find_and_batch_mails(dir: PathBuf, sender: Sender<ProcessInput>) {
-    let batch_size = 64;
-    let mut batch = Vec::with_capacity(batch_size);
-    for mail in find_mails(dir) {
-        batch.push(mail);
-        if batch.len() == batch_size {
-            sender.send(batch).expect("Receivers outlive sender");
-
-            batch = Vec::with_capacity(batch_size);
-        }
-    }
-    sender.send(batch).expect("Receivers outlive sender");
-}
-
-type ProcessInput = Vec<PathBuf>;
 
 fn process_mail(
     p: PathBuf,
@@ -46,12 +29,10 @@ fn process_mail(
     Ok(())
 }
 
-fn process_mails(matcher: impl Matcher, receiver: Receiver<ProcessInput>) -> AddrCollection {
+fn process_mails(matcher: impl Matcher, mails: &Mails) -> AddrCollection {
     let mut addrs = AddrCollection::new();
-    while let Ok(paths) = receiver.recv() {
-        for path in paths {
-            let _ = process_mail(path, &matcher, &mut addrs);
-        }
+    while let Some(path) = mails.get() {
+        let _ = process_mail(path, &matcher, &mut addrs);
     }
     addrs
 }
@@ -60,23 +41,18 @@ pub struct GenericBackend;
 
 impl Backend for GenericBackend {
     fn run(dir: PathBuf, matcher: impl Matcher) {
+        let mails = &*Box::leak(Box::new(Mails::new(dir)));
         let num_threads = num_cpus::get();
-        let (path_sender, path_receiver) = bounded(num_threads);
-
-        let _ = std::thread::spawn(|| {
-            find_and_batch_mails(dir, path_sender);
-        });
 
         let threads = (1..num_threads)
             .into_iter()
             .map(|_| {
                 let m = matcher.clone();
-                let r = path_receiver.clone();
-                std::thread::spawn(move || process_mails(m, r))
+                std::thread::spawn(move || process_mails(m, mails))
             })
             .collect::<Vec<_>>();
 
-        let mut addrs = process_mails(matcher, path_receiver);
+        let mut addrs = process_mails(matcher, mails);
         for thread in threads {
             addrs.merge(thread.join().unwrap());
         }
