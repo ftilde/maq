@@ -43,6 +43,7 @@ impl Backend for GenericBackend {
     fn run(dir: PathBuf, matcher: impl Matcher) {
         let mails = &*Box::leak(Box::new(Mails::new(dir)));
         let num_threads = num_cpus::get();
+        //let num_threads = 1;
 
         let threads = (1..num_threads)
             .into_iter()

@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 
 mod executor;
 
-use executor::{close, open, read_to_vec, Executor};
+use executor::{close, open, read_to_vec, Executor, ExecutorPollResult};
 
 pub struct IoUringBackend;
 
@@ -52,19 +52,33 @@ async fn process(path: PathBuf, matcher: &impl Matcher, addrs: &RefCell<AddrColl
 
 fn process_mails(matcher: impl Matcher, mails: &Mails) -> AddrCollection {
     let addrs = RefCell::new(AddrCollection::new());
-    let num_parallel_mails = 1 << 6;
-    let mut executor = Executor::new(num_parallel_mails);
-    for _ in 0..num_parallel_mails {
-        if let Some(m) = mails.get() {
-            executor.spawn(process(m, &matcher, &addrs));
-        }
+    let num_parallel_mails = 1usize << 6;
+    let mut executor = Executor::new(num_parallel_mails as u32);
+
+    if let Some(m) = mails.get() {
+        executor.spawn(process(m, &matcher, &addrs));
     }
 
     while executor.has_tasks() {
-        if executor.poll().is_ready() {
-            if let Some(m) = mails.get() {
-                executor.spawn(process(m, &matcher, &addrs));
+        match executor.poll(false) {
+            ExecutorPollResult::Finished => {
+                if let Some(m) = mails.get() {
+                    executor.spawn(process(m, &matcher, &addrs));
+                }
             }
+            ExecutorPollResult::WouldBlock => {
+                if executor.num_tasks() < num_parallel_mails {
+                    if let Some(m) = mails.get() {
+                        executor.spawn(process(m, &matcher, &addrs));
+                    }
+                }
+                if let ExecutorPollResult::Finished = executor.poll(true) {
+                    if let Some(m) = mails.get() {
+                        executor.spawn(process(m, &matcher, &addrs));
+                    }
+                }
+            }
+            ExecutorPollResult::Polled => {}
         }
     }
     std::mem::drop(executor);

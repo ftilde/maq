@@ -63,10 +63,10 @@ impl Future for IouOp {
                     unsafe { sub.push(op) }
                 };
 
-                if uring.submission().len() > 0 {
-                    let _foo = uring.submit().unwrap(); //TODO figure out where to submit best
-                                                        //println!("BAR: {}", foo);
-                }
+                //if uring.submission().len() > 0 {
+                //    let _foo = uring.submit().unwrap();
+                //    //println!("BAR: {}", _foo);
+                //}
                 assert!(res.is_ok(), "Queue is full!");
                 this.state = IouOpState::Submitted;
                 Poll::Pending
@@ -235,6 +235,10 @@ impl<'tasks> Executor<'tasks> {
         }
     }
 
+    pub fn num_tasks(&self) -> usize {
+        self.tasks.len()
+    }
+
     pub fn spawn(&mut self, f: impl Future<Output = ()> + 'tasks) {
         let mut task = Task::new(f);
 
@@ -256,15 +260,23 @@ impl<'tasks> Executor<'tasks> {
         assert!(prev.is_none(), "Id somehow reused");
     }
 
-    fn next_result(&mut self) -> (TaskId, i32) {
+    fn next_result(&mut self, wait: bool) -> Option<(TaskId, i32)> {
         let result = loop {
+            if !wait {
+                let _foo = self.uring.submit().unwrap();
+                //println!("Not wait: {}", _foo);
+            }
             {
                 if let Some(res) = self.uring.completion().available().into_iter().next() {
                     break res;
                 }
             }
+            if !wait {
+                //println!("Not ready");
+                return None;
+            }
             let _foo = self.uring.submit_and_wait(1).unwrap(); //TODO figure out where to submit best
-                                                               //println!("FOO: {}", foo);
+                                                               //println!("Wait: {}", _foo);
             break self
                 .uring
                 .completion()
@@ -275,11 +287,15 @@ impl<'tasks> Executor<'tasks> {
         };
         let id = result.user_data();
         let task_result = result.result();
-        (TaskId(id), task_result)
+        Some((TaskId(id), task_result))
     }
 
-    pub fn poll(&mut self) -> Poll<()> {
-        let (task_id, result) = self.next_result();
+    pub fn poll(&mut self, wait: bool) -> ExecutorPollResult {
+        let (task_id, result) = if let Some(r) = self.next_result(wait) {
+            r
+        } else {
+            return ExecutorPollResult::WouldBlock;
+        };
         let uring = &mut self.uring;
         let task = self.tasks.get_mut(&task_id).expect("Invalid task id");
 
@@ -291,10 +307,10 @@ impl<'tasks> Executor<'tasks> {
 
         let mut context = Context::from_waker(&self.waker);
         let res = match task.future.as_mut().poll(&mut context) {
-            r @ Poll::Pending => r,
-            r @ Poll::Ready(_) => {
+            Poll::Pending => ExecutorPollResult::Polled,
+            Poll::Ready(_) => {
                 self.tasks.remove(&task_id).expect("Invalid task_id");
-                r
+                ExecutorPollResult::Finished
             }
         };
 
@@ -311,4 +327,10 @@ impl<'tasks> Executor<'tasks> {
     pub fn has_tasks(&self) -> bool {
         !self.tasks.is_empty()
     }
+}
+
+pub enum ExecutorPollResult {
+    WouldBlock,
+    Polled,
+    Finished,
 }
