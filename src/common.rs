@@ -48,10 +48,6 @@ impl Mails {
     }
 }
 
-fn to_io_err<I>(_: I) -> std::io::Error {
-    std::io::Error::from(std::io::ErrorKind::InvalidInput)
-}
-
 pub enum HeaderParseResult {
     NeedMore,
     Done,
@@ -70,21 +66,44 @@ pub fn process_mail_header(
             [b'T', b'o', b':', ..] => true,
             [b'C', b'C', b':', ..] => true,
             [b'B', b'C', b'C', b':', ..] => true,
-            [b'\n', ..] => return HeaderParseResult::Done,
+            [b'\n', ..] => {
+                return HeaderParseResult::Done;
+            }
             _ => false,
         };
 
         if interesting {
-            if let Ok((addrs, next_pos)) = parse_header_line(&buf[*pos..], matcher.clone()) {
-                if next_pos == buf.len() {
-                    // Might not be the whole addr line, better read more and try again
-                    return HeaderParseResult::NeedMore;
+            let mut newline_search_start = *pos;
+            let header_line_end = loop {
+                if let Some(next_offset) = memchr::memchr(b'\n', &buf[newline_search_start..]) {
+                    let newline_begin = newline_search_start + next_offset + 1;
+                    match buf.get(newline_begin) {
+                        None => return HeaderParseResult::NeedMore,
+                        Some(b' ') | Some(b'\t') => newline_search_start = newline_begin,
+                        _ => break newline_begin,
+                    }
                 } else {
-                    *pos += next_pos;
+                    // TODO possibly somehow store the current position and restart searching for
+                    // newline on next call.
+                    return HeaderParseResult::NeedMore;
+                }
+            };
+            match parse_header_line(&buf[*pos..header_line_end], matcher.clone()) {
+                Ok((addrs, _)) => {
+                    *pos = header_line_end;
                     for addr in addrs {
                         addr_collection.add(addr);
                     }
                     continue;
+                }
+                Err(_) => {
+                    //eprintln!(
+                    //    "Err: {}:\n{}",
+                    //    e,
+                    //    String::from_utf8_lossy(&buf[*pos..header_line_end])
+                    //);
+                    // header might be cut in half or something and thus invalid. Read more and try again
+                    //return HeaderParseResult::NeedMore;
                 }
             }
         }
@@ -100,11 +119,9 @@ pub fn process_mail_header(
 pub fn parse_header_line<'matcher>(
     line: &[u8],
     matcher: impl Matcher,
-) -> Result<(impl Iterator<Item = SingleInfo> + 'matcher, usize), std::io::Error> {
-    let header = parse_header(&line).map_err(to_io_err)?;
-    let iter = addrparse(&header.0.get_value())
-        .map_err(to_io_err)?
-        .into_inner();
+) -> Result<(impl Iterator<Item = SingleInfo> + 'matcher, usize), mailparse::MailParseError> {
+    let header = parse_header(&line)?;
+    let iter = addrparse(&header.0.get_value())?.into_inner();
     Ok((
         iter.into_iter().filter_map(move |addr| {
             let addr = match addr {
