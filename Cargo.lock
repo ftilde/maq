@@ -189,6 +189,7 @@ dependencies = [
 [[package]]
 name = "mailparse"
 version = "0.12.0"
+source = "git+https://github.com/staktrace/mailparse#25b4820947997cba35bb937ff07517af877caa81"
 dependencies = [
  "base64",
  "charset",
