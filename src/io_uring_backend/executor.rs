@@ -135,24 +135,8 @@ pub async fn close(file: File) -> std::io::Result<()> {
     IouOp::new(op).await.map(|_| ())
 }
 
-#[allow(unused)]
-pub async fn read(file: &mut File, buf: &mut [u8]) -> std::io::Result<usize> {
-    let fd = file.inner.as_raw_fd();
-    let op = Read::new(Target::Fd(fd), buf.as_mut_ptr(), buf.len() as _)
-        .offset(file.offset as _)
-        .build();
-
-    match IouOp::new(op).await {
-        Ok(num_written) => {
-            let num_written = num_written as usize;
-            file.offset += num_written;
-            Ok(num_written)
-        }
-        Err(e) => Err(e),
-    }
-}
-
-pub async fn read_to_vec(
+// Safety: You have to make sure to not drop the future while this operation is in flight!
+pub async unsafe fn read_to_vec(
     file: &mut File,
     buf: &mut Vec<u8>,
     max_to_read: usize,
@@ -161,7 +145,7 @@ pub async fn read_to_vec(
     let append_pos = buf.len();
     let additional_storage = append_pos.saturating_sub(buf.capacity()) + max_to_read;
     buf.reserve(additional_storage);
-    let write_pos = unsafe { buf.as_mut_ptr().add(append_pos) };
+    let write_pos = buf.as_mut_ptr().add(append_pos);
     let op = Read::new(Target::Fd(fd), write_pos, max_to_read as _)
         .offset(file.offset as _)
         .build();
@@ -169,7 +153,7 @@ pub async fn read_to_vec(
     match IouOp::new(op).await {
         Ok(num_written) => {
             let num_written = num_written as usize;
-            unsafe { buf.set_len(append_pos + num_written) };
+            buf.set_len(append_pos + num_written);
             file.offset += num_written;
             Ok(num_written)
         }
