@@ -74,13 +74,13 @@ pub fn process_mail_header(
 
         if interesting {
             let mut newline_search_start = *pos;
-            let header_line_end = loop {
+            let next_line_begin = loop {
                 if let Some(next_offset) = memchr::memchr(b'\n', &buf[newline_search_start..]) {
-                    let newline_begin = newline_search_start + next_offset + 1;
-                    match buf.get(newline_begin) {
+                    let next_line_begin = newline_search_start + next_offset + 1;
+                    match buf.get(next_line_begin) {
                         None => return HeaderParseResult::NeedMore,
-                        Some(b' ') | Some(b'\t') => newline_search_start = newline_begin,
-                        _ => break newline_begin,
+                        Some(b' ') | Some(b'\t') => newline_search_start = next_line_begin,
+                        _ => break next_line_begin,
                     }
                 } else {
                     // TODO possibly somehow store the current position and restart searching for
@@ -88,60 +88,35 @@ pub fn process_mail_header(
                     return HeaderParseResult::NeedMore;
                 }
             };
-            match parse_header_line(&buf[*pos..header_line_end], matcher.clone()) {
-                Ok((addrs, _)) => {
-                    *pos = header_line_end;
-                    for addr in addrs {
-                        addr_collection.add(addr);
+            let line = &buf[*pos..next_line_begin];
+            if let Ok(header) = parse_header(&line) {
+                if let Ok(iter) = addrparse_header(&header.0) {
+                    for addr in iter.into_inner() {
+                        if let MailAddr::Single(addr) = addr {
+                            if matcher.matches(&addr.addr)
+                                || addr
+                                    .display_name
+                                    .as_ref()
+                                    .map(|n| matcher.matches(n))
+                                    .unwrap_or(false)
+                            {
+                                addr_collection.add(addr);
+                            }
+                        }
                     }
-                    continue;
-                }
-                Err(_) => {
-                    //eprintln!(
-                    //    "Err: {}:\n{}",
-                    //    e,
-                    //    String::from_utf8_lossy(&buf[*pos..header_line_end])
-                    //);
-                    // header might be cut in half or something and thus invalid. Read more and try again
-                    //return HeaderParseResult::NeedMore;
                 }
             }
-        }
-        if let Some(next_offset) = memchr::memchr(b'\n', &buf[*pos..]) {
-            *pos += next_offset + 1;
+
+            *pos = next_line_begin;
         } else {
-            return HeaderParseResult::NeedMore;
+            if let Some(next_offset) = memchr::memchr(b'\n', &buf[*pos..]) {
+                *pos += next_offset + 1;
+            } else {
+                return HeaderParseResult::NeedMore;
+            }
         }
     }
     HeaderParseResult::NeedMore
-}
-
-pub fn parse_header_line<'matcher>(
-    line: &[u8],
-    matcher: impl Matcher,
-) -> Result<(impl Iterator<Item = SingleInfo> + 'matcher, usize), mailparse::MailParseError> {
-    let header = parse_header(&line)?;
-    let iter = addrparse_header(&header.0)?.into_inner();
-    Ok((
-        iter.into_iter().filter_map(move |addr| {
-            let addr = match addr {
-                MailAddr::Single(a) => a,
-                MailAddr::Group(_) => return None,
-            };
-            if matcher.matches(&addr.addr)
-                || addr
-                    .display_name
-                    .as_ref()
-                    .map(|n| matcher.matches(n))
-                    .unwrap_or(false)
-            {
-                Some(addr.clone())
-            } else {
-                None
-            }
-        }),
-        header.1,
-    ))
 }
 
 #[derive(Default)]
