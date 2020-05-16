@@ -1,6 +1,6 @@
 use crate::Matcher;
 use core::sync::atomic::{AtomicUsize, Ordering};
-use mailparse::{addrparse, parse_header, MailAddr, SingleInfo};
+use mailparse::{addrparse_header, parse_header, MailAddr, SingleInfo};
 use std::collections::HashMap;
 use std::io::Write;
 use std::path::PathBuf;
@@ -121,7 +121,7 @@ pub fn parse_header_line<'matcher>(
     matcher: impl Matcher,
 ) -> Result<(impl Iterator<Item = SingleInfo> + 'matcher, usize), mailparse::MailParseError> {
     let header = parse_header(&line)?;
-    let iter = addrparse(&header.0.get_value())?.into_inner();
+    let iter = addrparse_header(&header.0)?.into_inner();
     Ok((
         iter.into_iter().filter_map(move |addr| {
             let addr = match addr {
