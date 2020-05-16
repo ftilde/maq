@@ -27,7 +27,8 @@ struct IouOp {
 }
 
 impl IouOp {
-    fn new(op: Entry) -> Self {
+    /// `op` must be a valid entry (see io_uring docs)
+    unsafe fn new(op: Entry) -> Self {
         IouOp {
             state: IouOpState::Inactive(op),
         }
@@ -57,9 +58,13 @@ impl Future for IouOp {
                 let op = op.user_data(CURRENT_TASK_ID.with(|i| i.get()).unwrap().0);
                 let uring_ptr = IO_URING.with(|t| t.get());
                 assert!(!uring_ptr.is_null(), "No uring");
+                // Safety: IO_URING is a thread local (=> no send/sync required) and is only ever
+                // set (i.e. != null) in `poll` and `spawn` (which both require a mutable safe
+                // reference.
                 let uring = unsafe { &mut *uring_ptr };
                 let res = {
                     let mut sub = uring.submission().available();
+                    // Safety: op is safe via new invariant.
                     unsafe { sub.push(op) }
                 };
 
@@ -123,8 +128,11 @@ pub async fn open(path: &Path) -> std::io::Result<File> {
 
     let op = Openat::new(Target::Fd(libc::AT_FDCWD), path.as_ref().as_ptr()).build();
 
-    IouOp::new(op)
+    // Safety: There are no safety concerns for the Openat operation.
+    unsafe { IouOp::new(op) }
         .await
+        // Safety: Openat returns a valid fd or an error, but the error case is already handled
+        // in the future implementation of IouOp.
         .map(|fd| unsafe { std::fs::File::from_raw_fd(fd).into() })
 }
 
@@ -132,30 +140,40 @@ pub async fn close(file: File) -> std::io::Result<()> {
     let fd = file.inner.into_raw_fd();
     let op = Close::new(Target::Fd(fd)).build();
 
-    IouOp::new(op).await.map(|_| ())
+    // Safety: file is a valid file, so fd is valid as well.
+    unsafe { IouOp::new(op) }.await.map(|_| ())
 }
 
-// Safety: You have to make sure to not drop the future while this operation is in flight!
-pub async unsafe fn read_to_vec(
+pub async fn read_to_vec(
     file: &mut File,
-    buf: &mut Vec<u8>,
+    buf: Vec<u8>,
     max_to_read: usize,
-) -> std::io::Result<usize> {
+) -> std::io::Result<(usize, Vec<u8>)> {
+    let mut buf = std::mem::ManuallyDrop::new(buf);
     let fd = file.inner.as_raw_fd();
     let append_pos = buf.len();
     let additional_storage = append_pos.saturating_sub(buf.capacity()) + max_to_read;
     buf.reserve(additional_storage);
-    let write_pos = buf.as_mut_ptr().add(append_pos);
+    // Safety: We just reserved that space.
+    let write_pos = unsafe { buf.as_mut_ptr().add(append_pos) };
     let op = Read::new(Target::Fd(fd), write_pos, max_to_read as _)
         .offset(file.offset as _)
         .build();
 
-    match IouOp::new(op).await {
+    // Safety:
+    // 1. fd corresponds to a valid std::fs::File
+    // 2. buf[write_pos..write_pos+max_to_read] is actually part of the buffer (see calculation of
+    //    `additional_storage` and the following `reserve` call.
+    // 3. If this future is dropped while the IouOp is in flight, buf is not invalidated and merely
+    //    leaked (Not ideal, but still safe. This should never happen in this application anyway.)
+    match unsafe { IouOp::new(op) }.await {
         Ok(num_written) => {
             let num_written = num_written as usize;
-            buf.set_len(append_pos + num_written);
+            // Safety: We have reserved the space (see above) and we have read the specified number
+            // of additional bytes.
+            unsafe { buf.set_len(append_pos + num_written) };
             file.offset += num_written;
-            Ok(num_written)
+            Ok((num_written, std::mem::ManuallyDrop::into_inner(buf)))
         }
         Err(e) => Err(e),
     }
@@ -173,6 +191,8 @@ fn dummy_raw_waker() -> RawWaker {
 
 fn dummy_waker() -> Waker {
     let raw = dummy_raw_waker();
+    // Safety: The dummy waker literally does nothing and thus upholds all cantracts of
+    // `RawWaker`/`RawWakerVTable`.
     unsafe { Waker::from_raw(raw) }
 }
 
@@ -215,8 +235,7 @@ impl<'tasks> Executor<'tasks> {
         async fn test_run() -> std::io::Result<()> {
             let path = Path::new("/dev/null");
             let mut file = open(path).await?;
-            // Safety: We never drop this future in flight
-            let _ = unsafe { read_to_vec(&mut file, &mut Vec::new(), 1).await? };
+            let _ = read_to_vec(&mut file, Vec::new(), 1).await?;
             close(file).await?;
             Ok(())
         }
@@ -325,12 +344,6 @@ impl<'tasks> Executor<'tasks> {
         IO_URING.with(|t| t.set(std::ptr::null_mut()));
         res
     }
-
-    //pub fn run(&mut self) {
-    //    while self.has_tasks() {
-    //        let _ = self.poll();
-    //    }
-    //}
 
     pub fn has_tasks(&self) -> bool {
         !self.tasks.is_empty()

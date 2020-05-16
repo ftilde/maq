@@ -27,8 +27,9 @@ async fn process_mail(
 
     let mut pos = 0;
     loop {
-        // Safety we don't ever spawn a future outside of the executor/drop it prematurely.
-        let num_read = unsafe { read_to_vec(&mut file, &mut buf, read_block_size) }.await?;
+        let ret = read_to_vec(&mut file, buf, read_block_size).await?;
+        let num_read = ret.0;
+        buf = ret.1;
         //eprintln!("File pos: {}", file.offset());
         if num_read == 0 {
             break;
