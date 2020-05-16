@@ -70,29 +70,34 @@ impl Matcher for FuzzyMatcher {
     }
 }
 
-trait Backend {
-    fn run(dir: PathBuf, matcher: impl Matcher);
+#[derive(Debug)]
+enum BackendError {
+    NotSupported,
+}
+trait Backend: Sized {
+    fn construct() -> Result<Self, BackendError>;
+    fn run(self, dir: PathBuf, matcher: impl Matcher);
 }
 
-fn run_backend<B: Backend>(options: Options) {
+fn run_backend(backend: impl Backend, options: Options) {
     // Somewhat ugly, but what we need for static dispatch
     if options.fuzzy {
         if options.ignore_case {
-            B::run(
+            backend.run(
                 options.dir,
                 CaseInsensitiveMatcher::<FuzzyMatcher>::new(options.search_string),
             )
         } else {
-            B::run(options.dir, FuzzyMatcher::new(options.search_string))
+            backend.run(options.dir, FuzzyMatcher::new(options.search_string))
         }
     } else {
         if options.ignore_case {
-            B::run(
+            backend.run(
                 options.dir,
                 CaseInsensitiveMatcher::<SubstringMatcher>::new(options.search_string),
             )
         } else {
-            B::run(options.dir, SubstringMatcher::new(options.search_string))
+            backend.run(options.dir, SubstringMatcher::new(options.search_string))
         }
     }
 }
@@ -100,13 +105,13 @@ fn run_backend<B: Backend>(options: Options) {
 fn main() {
     let options = Options::from_args();
     if options.generic_backend {
-        run_backend::<GenericBackend>(options);
+        run_backend(GenericBackend::construct().unwrap(), options);
     } else {
-        if IoUringBackend::is_supported() {
-            run_backend::<IoUringBackend>(options);
+        if let Ok(backend) = IoUringBackend::construct() {
+            run_backend(backend, options);
         } else {
             eprintln!("IO-uring backend is not (fully) on your system supported. (Linux Kernel version 5.6 or above is required.) Falling back to generic backend.");
-            run_backend::<GenericBackend>(options);
+            run_backend(GenericBackend::construct().unwrap(), options);
         }
     }
 }

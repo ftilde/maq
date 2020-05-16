@@ -7,12 +7,8 @@ mod executor;
 
 use executor::{close, open, read_to_vec, Executor, ExecutorPollResult};
 
-pub struct IoUringBackend;
-
-impl IoUringBackend {
-    pub fn is_supported() -> bool {
-        Executor::fully_supported()
-    }
+pub struct IoUringBackend<'a> {
+    main_executor: Executor<'a>,
 }
 
 async fn process_mail(
@@ -52,10 +48,9 @@ async fn process(path: PathBuf, matcher: &impl Matcher, addrs: &RefCell<AddrColl
     }
 }
 
-fn process_mails(matcher: impl Matcher, mails: &Mails) -> AddrCollection {
+fn process_mails(executor: Executor, matcher: impl Matcher, mails: &Mails) -> AddrCollection {
     let addrs = RefCell::new(AddrCollection::new());
-    let num_parallel_mails = 1usize << 6;
-    let mut executor = Executor::new(num_parallel_mails as u32);
+    let mut executor = executor;
 
     if let Some(m) = mails.get() {
         executor.spawn(process(m, &matcher, &addrs));
@@ -69,7 +64,7 @@ fn process_mails(matcher: impl Matcher, mails: &Mails) -> AddrCollection {
                 }
             }
             ExecutorPollResult::WouldBlock => {
-                if executor.num_tasks() < num_parallel_mails {
+                if executor.num_tasks() < executor.max_tasks() {
                     if let Some(m) = mails.get() {
                         executor.spawn(process(m, &matcher, &addrs));
                     }
@@ -87,8 +82,19 @@ fn process_mails(matcher: impl Matcher, mails: &Mails) -> AddrCollection {
     addrs.into_inner()
 }
 
-impl Backend for IoUringBackend {
-    fn run(dir: PathBuf, matcher: impl Matcher) {
+const QUEUE_SIZE: u32 = 1 << 6;
+
+impl Backend for IoUringBackend<'_> {
+    fn construct() -> Result<Self, crate::BackendError> {
+        let executor = Executor::new(QUEUE_SIZE);
+        let executor = executor
+            .fully_supported()
+            .map_err(|_| crate::BackendError::NotSupported)?;
+        Ok(IoUringBackend {
+            main_executor: executor,
+        })
+    }
+    fn run(self, dir: PathBuf, matcher: impl Matcher) {
         let mails = &*Box::leak(Box::new(Mails::new(dir)));
         let num_threads = num_cpus::get();
         //let num_threads = 1;
@@ -97,11 +103,14 @@ impl Backend for IoUringBackend {
             .into_iter()
             .map(|_| {
                 let m = matcher.clone();
-                std::thread::spawn(move || process_mails(m, mails))
+                std::thread::spawn(move || {
+                    let executor = Executor::new(QUEUE_SIZE);
+                    process_mails(executor, m, mails)
+                })
             })
             .collect::<Vec<_>>();
 
-        let mut addrs = process_mails(matcher, mails);
+        let mut addrs = process_mails(self.main_executor, matcher, mails);
         for thread in threads {
             addrs.merge(thread.join().unwrap());
         }

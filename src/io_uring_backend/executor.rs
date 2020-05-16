@@ -228,10 +228,11 @@ pub struct Executor<'tasks> {
     tasks: HashMap<TaskId, Task<'tasks>>,
     uring: io_uring::IoUring,
     waker: Waker,
+    queue_size: usize,
 }
 
 impl<'tasks> Executor<'tasks> {
-    pub fn fully_supported() -> bool {
+    pub fn fully_supported(self) -> std::io::Result<Self> {
         async fn test_run() -> std::io::Result<()> {
             let path = Path::new("/dev/null");
             let mut file = open(path).await?;
@@ -239,19 +240,29 @@ impl<'tasks> Executor<'tasks> {
             close(file).await?;
             Ok(())
         }
-        let mut success = false;
-        {
-            let mut executor = Executor::new(1);
+        let mut res = Ok(());
+        let mut executor = self;
+        let executor = {
             executor.spawn(async {
-                if test_run().await.is_ok() {
-                    success = true;
+                if let Err(e) = test_run().await {
+                    res = Err(e);
                 }
             });
-            while executor.has_tasks() {
-                executor.poll(true);
-            }
+            executor.run_to_completion()
+        };
+        res.map(|_| executor)
+    }
+
+    pub fn run_to_completion<'a>(mut self) -> Executor<'a> {
+        while self.has_tasks() {
+            self.poll(true);
         }
-        success
+        Executor {
+            tasks: HashMap::new(),
+            uring: self.uring,
+            waker: self.waker,
+            queue_size: self.queue_size,
+        }
     }
 
     pub fn new(queue_size: u32) -> Self {
@@ -259,7 +270,12 @@ impl<'tasks> Executor<'tasks> {
             tasks: HashMap::new(),
             uring: io_uring::IoUring::new(queue_size).unwrap(),
             waker: dummy_waker(),
+            queue_size: queue_size as _,
         }
+    }
+
+    pub fn max_tasks(&self) -> usize {
+        self.queue_size
     }
 
     pub fn num_tasks(&self) -> usize {
