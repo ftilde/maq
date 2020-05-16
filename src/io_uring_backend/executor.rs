@@ -211,6 +211,30 @@ pub struct Executor<'tasks> {
 }
 
 impl<'tasks> Executor<'tasks> {
+    pub fn fully_supported() -> bool {
+        async fn test_run() -> std::io::Result<()> {
+            let path = Path::new("/dev/null");
+            let mut file = open(path).await?;
+            // Safety: We never drop this future in flight
+            let _ = unsafe { read_to_vec(&mut file, &mut Vec::new(), 1).await? };
+            close(file).await?;
+            Ok(())
+        }
+        let mut success = false;
+        {
+            let mut executor = Executor::new(1);
+            executor.spawn(async {
+                if test_run().await.is_ok() {
+                    success = true;
+                }
+            });
+            while executor.has_tasks() {
+                executor.poll(true);
+            }
+        }
+        success
+    }
+
     pub fn new(queue_size: u32) -> Self {
         Executor {
             tasks: HashMap::new(),

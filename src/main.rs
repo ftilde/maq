@@ -99,9 +99,14 @@ fn run_backend<B: Backend>(options: Options) {
 
 fn main() {
     let options = Options::from_args();
-    if !options.generic_backend && IoUringBackend::is_supported() {
-        run_backend::<IoUringBackend>(options);
-    } else {
+    if options.generic_backend {
         run_backend::<GenericBackend>(options);
+    } else {
+        if IoUringBackend::is_supported() {
+            run_backend::<IoUringBackend>(options);
+        } else {
+            eprintln!("IO-uring backend is not (fully) on your system supported. (Linux Kernel version 5.6 or above is required.) Falling back to generic backend.");
+            run_backend::<GenericBackend>(options);
+        }
     }
 }

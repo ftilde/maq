@@ -11,7 +11,7 @@ pub struct IoUringBackend;
 
 impl IoUringBackend {
     pub fn is_supported() -> bool {
-        false
+        Executor::fully_supported()
     }
 }
 
