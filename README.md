@@ -40,8 +40,8 @@ ARGS:
 
 Add the following to your `muttrc` for case-insensitive, fuzzy address completion in mutt:
 
-```
-set query_command = "/path/to/maq -i -f -s '%s' /path/to/maildir"
+```muttrc
+set query_command = "/path/to/maq -i -f -s %s /path/to/maildir"
 ```
 
 ## Building
