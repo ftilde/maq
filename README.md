@@ -9,7 +9,7 @@ Compared to [mail-query](https://github.com/pbrisbin/mail-query) it has the foll
 * The most frequent variation is used as the display name
 * Search ergonomics can be improved using the `--fuzzy` and `--ignore-case` flags
 * 7-bit ASCII encoded MIME-headers are decoded automatically
-* Mail processing is parallelized and thus (depending on your hardware) faster
+* Mail processing is parallelized and thus (possibly, depending on your hardware) faster
 * An io_uring backend, which may be beneficial if you have few cores and/or limited ram for disk cache
 
 In contrast to mail-query, maq does not (yet?) support regex search.
@@ -46,7 +46,7 @@ set query_command = "/path/to/maq -i -f -s %s /path/to/maildir"
 
 ## Building
 
-uvp is written in Rust and needs a working installation of cargo to build.
+maq is written in Rust and needs a working installation of cargo to build.
 
 ```
 $ git clone https://github.com/ftilde/maq
