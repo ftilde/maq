@@ -126,7 +126,7 @@ pub async fn open(path: &Path) -> std::io::Result<File> {
     let path = path.as_os_str();
     let path = CString::new(OsStrExt::as_bytes(path)).unwrap();
 
-    let op = Openat::new(Target::Fd(libc::AT_FDCWD), path.as_ref().as_ptr()).build();
+    let op = Openat::new(libc::AT_FDCWD, path.as_ref().as_ptr()).build();
 
     // Safety: There are no safety concerns for the Openat operation.
     unsafe { IouOp::new(op) }
@@ -138,7 +138,7 @@ pub async fn open(path: &Path) -> std::io::Result<File> {
 
 pub async fn close(file: File) -> std::io::Result<()> {
     let fd = file.inner.into_raw_fd();
-    let op = Close::new(Target::Fd(fd)).build();
+    let op = Close::new(fd).build();
 
     // Safety: file is a valid file, so fd is valid as well.
     unsafe { IouOp::new(op) }.await.map(|_| ())

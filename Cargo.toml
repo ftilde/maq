@@ -10,14 +10,13 @@ license = "MIT"
 debug = true #for profiling
 
 [dependencies]
-mailparse = { git = "https://github.com/staktrace/mailparse"}
-#mailparse = { path="../mailparse" }
+mailparse = "0.13"
 walkdir = "2.3"
 structopt = "0.3"
 bstr = "0.2"
-fuzzy-matcher = "0.3"
+fuzzy-matcher = "0.3.7"
 crossbeam-channel = "0.4"
 num_cpus = "1.12"
-io-uring = { version = "0.3.4", features = ["concurrent", "unstable"] }
+io-uring = { version = "0.3.5", features = ["concurrent", "unstable"] }
 libc = "0.2.67"
 memchr = "2.3"

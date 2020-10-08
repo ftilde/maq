@@ -66,7 +66,9 @@ impl Matcher for FuzzyMatcher {
         FuzzyMatcher(pattern)
     }
     fn matches(&self, s: &str) -> bool {
-        fuzzy_matcher::skim::fuzzy_match(s, &self.0).is_some()
+        fuzzy_matcher::skim::SkimMatcherV2::default()
+            .fuzzy(s, &self.0, false)
+            .is_some()
     }
 }
 
