@@ -20,5 +20,4 @@ crossbeam-channel = "0.4"
 num_cpus = "1.12"
 io-uring = { version = "0.3.4", features = ["concurrent", "unstable"] }
 libc = "0.2.67"
-lazy_static = "1.4"
 memchr = "2.3"

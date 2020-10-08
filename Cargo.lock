@@ -204,7 +204,6 @@ dependencies = [
  "crossbeam-channel",
  "fuzzy-matcher",
  "io-uring",
- "lazy_static",
  "libc",
  "mailparse",
  "memchr",
