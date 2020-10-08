@@ -133,7 +133,7 @@ impl AddrCollection {
     pub fn add(&mut self, addr: SingleInfo) {
         let data = self
             .addrs
-            .entry(addr.addr.to_owned())
+            .entry(addr.addr.to_lowercase())
             .or_insert(AddrData::default());
         data.occurences += 1;
         if let Some(name) = &addr.display_name {
